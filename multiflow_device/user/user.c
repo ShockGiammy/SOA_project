@@ -26,7 +26,7 @@ void * the_thread(void* path){
 		return NULL;
 	}
 	printf("device %s successfully opened\n", device);
-	ioctl(fd,1);
+	ioctl(fd,0);
 
 	write(fd, DATA, SIZE);
 	return NULL;

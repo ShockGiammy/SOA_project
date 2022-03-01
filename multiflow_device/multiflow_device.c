@@ -18,9 +18,9 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Gian Marco Falcone");
 
-#define MODNAME "CHAR DEV"
+#define MODNAME "MULTI-FLOW DEV"
 
-
+#define AUDIT if(1)
 
 static int dev_open(struct inode *, struct file *);
 static int dev_release(struct inode *, struct file *);
@@ -28,11 +28,11 @@ static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
 static ssize_t dev_read(struct file *, char *, size_t, loff_t *);
 static ssize_t dev_ioctl(struct file *, unsigned int, unsigned long);
 int re_write_buffer(char *buffer, size_t off, size_t len);
+bool test_float(const char *str);
 
 #define DEVICE_NAME "my-new-dev"  /* Device file name in /dev/ - not mandatory  */
 
 #define SINGLE_SESSION_OBJECT //just one session per I/O node at a time
-
 
 static int Major;            /* Major number assigned to broadcast device driver */
 
@@ -44,6 +44,13 @@ static int Major;            /* Major number assigned to broadcast device driver
 #define get_minor(session)	MINOR(session->f_dentry->d_inode->i_rdev)
 #endif
 
+enum priority{
+   HIGH_PRIORITY,    //0 if high priority
+   LOW_PRIORITY      //1 if low priority
+};
+#define TIMEOUT 2
+#define BLOCKING 3
+#define NON_BLOCKING 4
 
 typedef struct _object_state{
 #ifdef SINGLE_SESSION_OBJECT
@@ -52,7 +59,9 @@ typedef struct _object_state{
 	struct mutex operation_synchronizer;
 	int valid_bytes_or_offest[2];
 	char* stream_content[2];    //the I/O node is a buffer in memory
-   int priority;     // 0 if high priority, 1 if low priority
+   enum priority priority;
+   bool blocking;
+   float timeout;
    //char* high_priorty_content;
 } object_state;
 
@@ -60,6 +69,72 @@ typedef struct _object_state{
 object_state objects[MINORS];
 
 #define OBJECT_MAX_SIZE  (4096) //just one page
+
+typedef struct _packed_work{
+        void* buffer;
+        long code;
+        struct work_struct the_work;
+} packed_work;
+
+
+void audit(unsigned long data){
+
+        AUDIT{
+                printk("%s: ------------------------------\n",MODNAME);
+                printk("%s: this print comes from kworker daemon with PID=%d - running on CPU-core %d\n",MODNAME,current->pid,smp_processor_id());
+        }
+
+        AUDIT
+        printk("%s: running task with code  %ld\n",MODNAME,container_of((void*)data,packed_work,the_work)->code);
+
+        AUDIT
+        printk("%s: releasing the task buffer at address %p - container of task is at %p\n",MODNAME,(void*)data,container_of((void*)data,packed_work,the_work));
+
+        kfree((void*)container_of((void*)data,packed_work,the_work));
+
+        module_put(THIS_MODULE);
+
+}
+
+
+int put_work(int core, int request_code){
+   
+   packed_work *the_task;
+
+	if(core >= num_online_cpus()) {
+      return -ENODEV;
+   }
+
+   if(!try_module_get(THIS_MODULE)) {
+      return -ENODEV;
+   }
+
+   AUDIT{
+      printk("%s: ------------------------\n",MODNAME);
+      printk("%s: requested deferred work with request code: %d\n",MODNAME,request_code);
+   }
+
+   the_task = kzalloc(sizeof(packed_work),GFP_ATOMIC);     //non blocking memory allocation
+
+   if (the_task == NULL) {
+      printk("%s: tasklet buffer allocation failure\n",MODNAME);
+      module_put(THIS_MODULE);
+      return -1;
+   }
+
+   the_task->buffer = the_task;
+   the_task->code = request_code;
+
+   AUDIT
+   printk("%s: work buffer allocation success - address is %p\n",MODNAME,the_task);
+
+
+   __INIT_WORK(&(the_task->the_work), (void*)audit, (unsigned long)(&(the_task->the_work)));
+
+   schedule_work_on(core, &the_task->the_work);
+
+   return 0;
+}
 
 
 /* the actual driver */
@@ -121,12 +196,27 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
+   // NON SO SE QUESTO IF SERVA, POTREI FORSE METTERE TUTTO INSIEME
    if (*off == 0) {
       if((OBJECT_MAX_SIZE) < len) {
-         len = OBJECT_MAX_SIZE;
+         if (!the_object->blocking) {
+            //len = OBJECT_MAX_SIZE;
+            mutex_unlock(&(the_object->operation_synchronizer));
+            return -ENOSPC;      //no space left on device
+         }
+         else {
+            //BLOCCA
+            printk("BLOCCA");
+         }
       }
-      ret = copy_from_user(&(the_object->stream_content[the_object->priority][the_object->valid_bytes_or_offest[the_object->priority]]),
-            buff, len);
+      printk("priority = %d\n", the_object->priority);
+      if (the_object->priority == HIGH_PRIORITY) {
+         ret = copy_from_user(&(the_object->stream_content[the_object->priority][the_object->valid_bytes_or_offest[the_object->priority]]),
+               buff, len);
+      }
+      else {
+         printk("CIAO");
+      }
    }
    else {
       if(*off >= OBJECT_MAX_SIZE) {    //offset too large
@@ -140,10 +230,22 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       } 
 
       if((OBJECT_MAX_SIZE - *off) < len) {
-         len = OBJECT_MAX_SIZE - *off;
+         if (!the_object->blocking) {
+            //len = OBJECT_MAX_SIZE - *off;
+            mutex_unlock(&(the_object->operation_synchronizer));
+            return -ENOSPC;      //no space left on device
+         }
+         else {
+            //BLOCCA
+            printk("BLOCCA");
+         }
       }
-
-      ret = copy_from_user(&(the_object->stream_content[the_object->priority][*off]), buff, len);
+      if (the_object->priority == HIGH_PRIORITY) {
+         ret = copy_from_user(&(the_object->stream_content[the_object->priority][*off]), buff, len);
+      }
+      else {
+         printk("CIAO");
+      }
    }  
    *off += (len - ret);
    the_object->valid_bytes_or_offest[the_object->priority] += *off;
@@ -158,7 +260,6 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
 
    int minor = get_minor(filp);
    int ret;
-   //int prev_off;
    object_state *the_object;
 
    the_object = objects + minor;
@@ -174,9 +275,20 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    } 
 
    if((the_object->valid_bytes_or_offest[the_object->priority] - *off) < len) {
-      len = the_object->valid_bytes_or_offest[the_object->priority] - *off;
+      if (the_object->blocking) {
+         /*printk("PROBLEMA?");
+         //len = the_object->valid_bytes_or_offest[the_object->priority] - *off;
+         mutex_unlock(&(the_object->operation_synchronizer));
+         return 0;      //not enough data to read
+      }
+      else {*/
+         //BLOCCA
+         printk("BLOCCA");
+      }
+      else {
+         len = the_object->valid_bytes_or_offest[the_object->priority] - *off;
+      }
    }
-
    ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][*off]), len);
 
    the_object->valid_bytes_or_offest[the_object->priority] = the_object->valid_bytes_or_offest[the_object->priority] - (len - ret);
@@ -201,7 +313,30 @@ static long dev_ioctl(struct file *filp, unsigned int command, unsigned long par
    printk("%s: somebody called an ioctl on dev with [major,minor] number [%d,%d] and command %u \n",
             MODNAME, get_major(filp), get_minor(filp), command);
 
-   //do here whathever you would like to control the state of the device
+   //ATT!!! potrebbe dover essere unico per sessione? così cambia uno e cambbiano tutti
+   switch(command) {
+         case HIGH_PRIORITY:
+            the_object->priority = HIGH_PRIORITY;
+            break;
+         case LOW_PRIORITY:
+            the_object->priority = LOW_PRIORITY;
+            break;
+         case TIMEOUT:
+            if (test_float((char*)param)) {
+               //TODO
+               //the_object->timeout = param;
+            }
+            break;
+         case BLOCKING:
+            the_object->blocking = true;
+            break;
+         case NON_BLOCKING:
+            the_object->blocking = false;
+            break;
+         default:
+            printk("Unknown operation\n");
+            break;
+   }
    return 0;
 }
 
@@ -228,9 +363,23 @@ int re_write_buffer(char *buffer, size_t off, size_t len) {
 }
 
 
+bool test_float(const char *str)
+{
+    int len;
+    float dummy = 0.0;
+    if (sscanf(str, "%f %n", &dummy, &len) == 1 && len == (int)strlen(str))
+        //printf("[%s] is valid (%.7g)\n", str, dummy);
+        return true;
+    else
+        //printf("[%s] is not valid (%.7g)\n", str, dummy);
+        return false;
+}
+
+
 int init_module(void) {
 
 	int i;
+   //int ret;
 
 	//initialize the drive internal state
 	for(i=0;i<MINORS;i++){
@@ -238,13 +387,15 @@ int init_module(void) {
 		mutex_init(&(objects[i].object_busy));
 #endif
 		mutex_init(&(objects[i].operation_synchronizer));
-      objects[i].priority = 0;
+      objects[i].priority = HIGH_PRIORITY;
 		objects[i].valid_bytes_or_offest[0] = 0;
       objects[i].valid_bytes_or_offest[1] = 0;
 		objects[i].stream_content[0] = NULL;
 		objects[i].stream_content[0] = (char*)__get_free_page(GFP_KERNEL);
       objects[i].stream_content[1] = NULL;
 		objects[i].stream_content[1] = (char*)__get_free_page(GFP_KERNEL);
+      objects[i].blocking = false;
+      objects[i].timeout = 0.0;
 		if ((objects[i].stream_content[0] == NULL) || (objects[i].stream_content[1] == NULL)){
          goto revert_allocation;
       }
@@ -260,6 +411,21 @@ int init_module(void) {
 
 	printk(KERN_INFO "%s: new device registered, it is assigned major number %d\n", MODNAME, Major);
 
+   /*// initialize the syscall for the deferred work
+   new_sys_call_array[0] = (unsigned long)sys_put_work;
+   ret = get_entries(restore,HACKED_ENTRIES,(unsigned long*)the_syscall_table, &the_ni_syscall);
+   if (ret != HACKED_ENTRIES){
+            printk("%s: could not hack %d entries (just %d)\n", MODNAME, HACKED_ENTRIES, ret);
+            return -1;
+   }
+
+   unprotect_memory();
+   for(i=0;i<HACKED_ENTRIES;i++){
+            ((unsigned long *)the_syscall_table)[restore[i]] = (unsigned long)new_sys_call_array[i];
+   }
+   protect_memory();
+   printk("%s: all new system-calls correctly installed on sys-call table\n", MODNAME);
+*/
 	return 0;
 
 revert_allocation:
@@ -283,5 +449,12 @@ void cleanup_module(void) {
 
 	printk(KERN_INFO "%s: new device unregistered, it was assigned major number %d\n", MODNAME, Major);
 
+   /*unprotect_memory();
+   for(i=0; i<HACKED_ENTRIES; i++){
+      ((unsigned long *)the_syscall_table)[restore[i]] = the_ni_syscall;
+   }
+   protect_memory();
+   printk("%s: sys-call table restored to its original content\n", MODNAME);
+*/
 	return;
 }
