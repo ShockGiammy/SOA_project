@@ -265,60 +265,38 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
+retry_write:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
-   // NON SO SE QUESTO IF SERVA, POTREI FORSE METTERE TUTTO INSIEME
-   if (*off == 0) {
-      if((OBJECT_MAX_SIZE) < len) {
-         mutex_unlock(&(the_object->operation_synchronizer));
-         if (!the_object->blocking) {
-            //len = OBJECT_MAX_SIZE;
-            return -ENOSPC;      //no space left on device
-         }
-         else {
-            goto_sleep(the_object);
-            printk("BLOCCA");
-            // serve ribloccare il mutex
-         }
-      }
-      if (the_object->priority == HIGH_PRIORITY) {
-         ret = copy_from_user(&(the_object->stream_content[the_object->priority][the_object->valid_bytes_or_offest[the_object->priority]]),
-               buff, len);
+   if(*off >= OBJECT_MAX_SIZE) {    //offset too large
+      mutex_unlock(&(the_object->operation_synchronizer));
+      return -ENOSPC;      //no space left on device
+   } 
+
+   if(*off > the_object->valid_bytes_or_offest[the_object->priority]) {      //offset beyond the current stream size
+      mutex_unlock(&(the_object->operation_synchronizer));
+      return -ENOSR;    //out of stream resources
+   } 
+
+   if((OBJECT_MAX_SIZE - *off) < len) {
+      mutex_unlock(&(the_object->operation_synchronizer));
+      if (!the_object->blocking) {
+         //len = OBJECT_MAX_SIZE - *off;
+         return -ENOSPC;      //no space left on device
       }
       else {
-         printk("CIAO");
+         goto_sleep(the_object);
+         printk("BLOCCA");
+         goto retry_write;
       }
    }
+   if (the_object->priority == HIGH_PRIORITY) {
+      ret = copy_from_user(&(the_object->stream_content[the_object->priority][the_object->valid_bytes_or_offest[the_object->priority]]),
+            buff, len);
+   }
    else {
-      if(*off >= OBJECT_MAX_SIZE) {    //offset too large
-         mutex_unlock(&(the_object->operation_synchronizer));
-         return -ENOSPC;      //no space left on device
-      } 
-
-      if(*off > the_object->valid_bytes_or_offest[the_object->priority]) {      //offset beyond the current stream size
-         mutex_unlock(&(the_object->operation_synchronizer));
-         return -ENOSR;    //out of stream resources
-      } 
-
-      if((OBJECT_MAX_SIZE - *off) < len) {
-         mutex_unlock(&(the_object->operation_synchronizer));
-         if (!the_object->blocking) {
-            //len = OBJECT_MAX_SIZE - *off;
-            return -ENOSPC;      //no space left on device
-         }
-         else {
-            goto_sleep(the_object);
-            printk("BLOCCA");
-            // serve ribloccare il mutex
-         }
-      }
-      if (the_object->priority == HIGH_PRIORITY) {
-         ret = copy_from_user(&(the_object->stream_content[the_object->priority][*off]), buff, len);
-      }
-      else {
-         printk("CIAO");
-      }
+      printk("CIAO");
    }  
    *off += (len - ret);
    the_object->valid_bytes_or_offest[the_object->priority] += *off;
@@ -339,6 +317,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    printk("%s: somebody called a read on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
+retry_read:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
@@ -349,15 +328,11 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
 
    if((the_object->valid_bytes_or_offest[the_object->priority] - *off) < len) {
       if (the_object->blocking && the_object->timeout != 0) {
-         /*printk("PROBLEMA?");
-         //len = the_object->valid_bytes_or_offest[the_object->priority] - *off;
-         mutex_unlock(&(the_object->operation_synchronizer));
-         return 0;      //not enough data to read
-      }
-      else {*/
          printk("BLOCCA");
          mutex_unlock(&(the_object->operation_synchronizer));
          goto_sleep(the_object);
+         //mutex_lock(&(the_object->operation_synchronizer));
+         goto retry_read;
       }
       else {
          len = the_object->valid_bytes_or_offest[the_object->priority] - *off;
