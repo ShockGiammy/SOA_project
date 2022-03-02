@@ -52,6 +52,9 @@ enum priority{
 #define BLOCKING 3
 #define NON_BLOCKING 4
 
+#define NO (0)
+#define YES (NO+1)
+
 typedef struct _object_state{
 #ifdef SINGLE_SESSION_OBJECT
 	struct mutex object_busy;
@@ -61,7 +64,7 @@ typedef struct _object_state{
 	char* stream_content[2];    //the I/O node is a buffer in memory
    enum priority priority;
    bool blocking;
-   float timeout;
+   unsigned long timeout;
    //char* high_priorty_content;
 } object_state;
 
@@ -71,28 +74,35 @@ object_state objects[MINORS];
 #define OBJECT_MAX_SIZE  (4096) //just one page
 
 typedef struct _packed_work{
-        void* buffer;
-        long code;
-        struct work_struct the_work;
+   void* buffer;
+   long code;
+   struct work_struct the_work;
 } packed_work;
+
+typedef struct _control_record{
+   struct task_struct *task;       
+   int pid;
+   int awake;
+   struct hrtimer hr_timer;
+} control_record;
 
 
 void audit(unsigned long data){
 
-        AUDIT{
-                printk("%s: ------------------------------\n",MODNAME);
-                printk("%s: this print comes from kworker daemon with PID=%d - running on CPU-core %d\n",MODNAME,current->pid,smp_processor_id());
-        }
+   AUDIT{
+      printk("%s: ------------------------------\n",MODNAME);
+      printk("%s: this print comes from kworker daemon with PID=%d - running on CPU-core %d\n",MODNAME,current->pid,smp_processor_id());
+   }
 
-        AUDIT
-        printk("%s: running task with code  %ld\n",MODNAME,container_of((void*)data,packed_work,the_work)->code);
+   AUDIT
+   printk("%s: running task with code  %ld\n",MODNAME,container_of((void*)data,packed_work,the_work)->code);
 
-        AUDIT
-        printk("%s: releasing the task buffer at address %p - container of task is at %p\n",MODNAME,(void*)data,container_of((void*)data,packed_work,the_work));
+   AUDIT
+   printk("%s: releasing the task buffer at address %p - container of task is at %p\n",MODNAME,(void*)data,container_of((void*)data,packed_work,the_work));
 
-        kfree((void*)container_of((void*)data,packed_work,the_work));
+   kfree((void*)container_of((void*)data,packed_work,the_work));
 
-        module_put(THIS_MODULE);
+   module_put(THIS_MODULE);
 
 }
 
@@ -137,6 +147,69 @@ int put_work(int core, int request_code){
 }
 
 
+static enum hrtimer_restart my_hrtimer_callback( struct hrtimer *timer ){
+
+   control_record *control;
+   struct task_struct *the_task;
+
+   control = (control_record*)container_of(timer,control_record, hr_timer);
+   control->awake = YES;
+   the_task = control->task;
+   wake_up_process(the_task);
+
+   return HRTIMER_NORESTART;
+}
+
+#define CLASSIC
+
+long goto_sleep(object_state *the_object){
+
+	control_record data;
+   control_record* control;
+   ktime_t ktime_interval;
+   DECLARE_WAIT_QUEUE_HEAD(the_queue);//here we use a private queue - wakeup is selective via wake_up_process
+
+   if(the_object->timeout == 0) {
+      return 0;
+   }
+
+   control = &data;//set the pointer to the current stack area
+
+   AUDIT
+   printk("%s: thread %d going to usleep for %lu microsecs\n", MODNAME, current->pid, the_object->timeout);
+
+   ktime_interval = ktime_set(0, the_object->timeout*1000);
+
+   //CLASSIC
+   //control->awake = NO;
+   //wait_event_interruptible_hrtimeout(the_queue, control->awake == YES, ktime_interval);
+
+   control->task = current;
+   control->pid  = current->pid;
+   control->awake = NO;
+
+   hrtimer_init(&(control->hr_timer), CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+
+   control->hr_timer.function = &my_hrtimer_callback;
+   hrtimer_start(&(control->hr_timer), ktime_interval, HRTIMER_MODE_REL);
+
+            
+   wait_event_interruptible(the_queue, control->awake == YES);
+
+   hrtimer_cancel(&(control->hr_timer));
+   
+   AUDIT
+   printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
+
+   if(unlikely(control->awake != YES)) {
+      return -1;
+   }
+
+   return 0;
+
+}
+
+
 /* the actual driver */
 
 static int dev_open(struct inode *inode, struct file *file) {
@@ -157,7 +230,6 @@ static int dev_open(struct inode *inode, struct file *file) {
    printk("%s: device file successfully opened for object with minor %d\n", MODNAME, minor);
    //device opened by a default nop
    return 0;
-
 
 #ifdef SINGLE_SESSION_OBJECT
 open_failure:
@@ -199,17 +271,17 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    // NON SO SE QUESTO IF SERVA, POTREI FORSE METTERE TUTTO INSIEME
    if (*off == 0) {
       if((OBJECT_MAX_SIZE) < len) {
+         mutex_unlock(&(the_object->operation_synchronizer));
          if (!the_object->blocking) {
             //len = OBJECT_MAX_SIZE;
-            mutex_unlock(&(the_object->operation_synchronizer));
             return -ENOSPC;      //no space left on device
          }
          else {
-            //BLOCCA
+            goto_sleep(the_object);
             printk("BLOCCA");
+            // serve ribloccare il mutex
          }
       }
-      printk("priority = %d\n", the_object->priority);
       if (the_object->priority == HIGH_PRIORITY) {
          ret = copy_from_user(&(the_object->stream_content[the_object->priority][the_object->valid_bytes_or_offest[the_object->priority]]),
                buff, len);
@@ -230,14 +302,15 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       } 
 
       if((OBJECT_MAX_SIZE - *off) < len) {
+         mutex_unlock(&(the_object->operation_synchronizer));
          if (!the_object->blocking) {
             //len = OBJECT_MAX_SIZE - *off;
-            mutex_unlock(&(the_object->operation_synchronizer));
             return -ENOSPC;      //no space left on device
          }
          else {
-            //BLOCCA
+            goto_sleep(the_object);
             printk("BLOCCA");
+            // serve ribloccare il mutex
          }
       }
       if (the_object->priority == HIGH_PRIORITY) {
@@ -275,24 +348,27 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    } 
 
    if((the_object->valid_bytes_or_offest[the_object->priority] - *off) < len) {
-      if (the_object->blocking) {
+      if (the_object->blocking && the_object->timeout != 0) {
          /*printk("PROBLEMA?");
          //len = the_object->valid_bytes_or_offest[the_object->priority] - *off;
          mutex_unlock(&(the_object->operation_synchronizer));
          return 0;      //not enough data to read
       }
       else {*/
-         //BLOCCA
          printk("BLOCCA");
+         mutex_unlock(&(the_object->operation_synchronizer));
+         goto_sleep(the_object);
       }
       else {
          len = the_object->valid_bytes_or_offest[the_object->priority] - *off;
+         //printk("Thread cannot go to sleep because the timeout is set to 0");
       }
    }
    ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][*off]), len);
 
    the_object->valid_bytes_or_offest[the_object->priority] = the_object->valid_bytes_or_offest[the_object->priority] - (len - ret);
 
+   // potreesti lavorare in buffer circolare => servono due indici (offset e validBytes)
    ret = re_write_buffer(the_object->stream_content[the_object->priority], *off, len);
    if (ret != 0) {
       printk("Error in re_write_buffer");
@@ -322,10 +398,9 @@ static long dev_ioctl(struct file *filp, unsigned int command, unsigned long par
             the_object->priority = LOW_PRIORITY;
             break;
          case TIMEOUT:
-            if (test_float((char*)param)) {
-               //TODO
-               //the_object->timeout = param;
-            }
+            //if (test_float(param)) {
+            the_object->timeout = param;
+            //}
             break;
          case BLOCKING:
             the_object->blocking = true;
