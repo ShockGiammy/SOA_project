@@ -11,14 +11,14 @@ char buff[4096];
 #define DATA "ciao a tutti\n"
 #define SIZE strlen(DATA)
 
-void * the_thread(void* path){
+void * the_thread(){
 
 	char* device;
 	int fd;
+	int decision;
 
-	device = (char*)path;
-	sleep(1);
-
+	printf("What device driver do you want to open?\n");
+	scanf("%s", device);
 	printf("opening device %s\n", device);
 	fd = open(device,O_RDWR);
 	if(fd == -1) {
@@ -26,9 +26,33 @@ void * the_thread(void* path){
 		return NULL;
 	}
 	printf("device %s successfully opened\n", device);
-	ioctl(fd,0);
 
-	write(fd, DATA, SIZE);
+	while(1) {
+		printf("Choose an operation to perform on the device driver:\n");
+		printf("1) Write data\n");
+		printf("2) Read data\n");
+		printf("3) Call ioctl() service\n");
+		printf("4) Close the device\n");
+		scanf("%d", &decision);
+		switch(decision) {
+			case 1:
+				write(fd, DATA, SIZE);
+				break;
+			case 2:
+				break;
+			case 3:
+				ioctl(fd,0);
+				break;
+			case 4:
+				printf("Bye bye!");
+				close(fd);
+				return NULL;
+			default:
+				printf("Operation not permitted\n");
+				break;
+		}
+
+	}
 	return NULL;
 }
 
@@ -55,8 +79,8 @@ int main(int argc, char** argv){
 		sprintf(buff, "mknod %s%d c %d %i\n", path, i, major, i);
 		system(buff);
 		sprintf(buff, "%s%d", path, i);
-		pthread_create(&tid, NULL, the_thread, strdup(buff));
     }
+	pthread_create(&tid, NULL, the_thread, NULL);
 
     pause();
     return 0;
