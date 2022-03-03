@@ -61,11 +61,11 @@ typedef struct _object_state{
 #endif
 	struct mutex operation_synchronizer;
 	int valid_bytes_or_offest[2];
+   int offset[2];
 	char* stream_content[2];    //the I/O node is a buffer in memory
    enum priority priority;
    bool blocking;
    unsigned long timeout;
-   //char* high_priorty_content;
 } object_state;
 
 #define MINORS 128
@@ -339,7 +339,8 @@ retry_read:
          //printk("Thread cannot go to sleep because the timeout is set to 0");
       }
    }
-   ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][*off]), len);
+   ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][0]), len);
+   //ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][*off]), len);
 
    the_object->valid_bytes_or_offest[the_object->priority] = the_object->valid_bytes_or_offest[the_object->priority] - (len - ret);
 
@@ -364,7 +365,7 @@ static long dev_ioctl(struct file *filp, unsigned int command, unsigned long par
    printk("%s: somebody called an ioctl on dev with [major,minor] number [%d,%d] and command %u \n",
             MODNAME, get_major(filp), get_minor(filp), command);
 
-   //ATT!!! potrebbe dover essere unico per sessione? così cambia uno e cambbiano tutti
+   //ATT!!! potrebbe dover essere unico per sessione? così cambia uno e cambiano tutti
    switch(command) {
          case HIGH_PRIORITY:
             the_object->priority = HIGH_PRIORITY;
@@ -461,21 +462,6 @@ int init_module(void) {
 
 	printk(KERN_INFO "%s: new device registered, it is assigned major number %d\n", MODNAME, Major);
 
-   /*// initialize the syscall for the deferred work
-   new_sys_call_array[0] = (unsigned long)sys_put_work;
-   ret = get_entries(restore,HACKED_ENTRIES,(unsigned long*)the_syscall_table, &the_ni_syscall);
-   if (ret != HACKED_ENTRIES){
-            printk("%s: could not hack %d entries (just %d)\n", MODNAME, HACKED_ENTRIES, ret);
-            return -1;
-   }
-
-   unprotect_memory();
-   for(i=0;i<HACKED_ENTRIES;i++){
-            ((unsigned long *)the_syscall_table)[restore[i]] = (unsigned long)new_sys_call_array[i];
-   }
-   protect_memory();
-   printk("%s: all new system-calls correctly installed on sys-call table\n", MODNAME);
-*/
 	return 0;
 
 revert_allocation:
@@ -499,12 +485,5 @@ void cleanup_module(void) {
 
 	printk(KERN_INFO "%s: new device unregistered, it was assigned major number %d\n", MODNAME, Major);
 
-   /*unprotect_memory();
-   for(i=0; i<HACKED_ENTRIES; i++){
-      ((unsigned long *)the_syscall_table)[restore[i]] = the_ni_syscall;
-   }
-   protect_memory();
-   printk("%s: sys-call table restored to its original content\n", MODNAME);
-*/
 	return;
 }
