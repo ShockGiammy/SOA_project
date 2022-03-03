@@ -269,17 +269,17 @@ retry_write:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
-   if(*off >= OBJECT_MAX_SIZE) {    //offset too large
+   if(the_object->offset >= OBJECT_MAX_SIZE) {    //offset too large
       mutex_unlock(&(the_object->operation_synchronizer));
       return -ENOSPC;      //no space left on device
    } 
 
-   if(*off > the_object->valid_bytes_or_offest[the_object->priority]) {      //offset beyond the current stream size
+   if(the_object->offset > the_object->valid_bytes_or_offest[the_object->priority]) {      //offset beyond the current stream size
       mutex_unlock(&(the_object->operation_synchronizer));
       return -ENOSR;    //out of stream resources
    } 
 
-   if((OBJECT_MAX_SIZE - *off) < len) {
+   if((OBJECT_MAX_SIZE - the_object->offset) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
       if (!the_object->blocking) {
          //len = OBJECT_MAX_SIZE - *off;
@@ -298,8 +298,8 @@ retry_write:
    else {
       printk("CIAO");
    }  
-   *off += (len - ret);
-   the_object->valid_bytes_or_offest[the_object->priority] += *off;
+   the_object->offset += (len - ret);
+   the_object->valid_bytes_or_offest[the_object->priority] += the_object->offset;
 
    mutex_unlock(&(the_object->operation_synchronizer));
 
@@ -321,12 +321,12 @@ retry_read:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
-   if(*off > the_object->valid_bytes_or_offest[the_object->priority]) {
+   if(the_object->offset > the_object->valid_bytes_or_offest[the_object->priority]) {
  	   mutex_unlock(&(the_object->operation_synchronizer));
 	   return 0;
    } 
 
-   if((the_object->valid_bytes_or_offest[the_object->priority] - *off) < len) {
+   if((the_object->valid_bytes_or_offest[the_object->priority] - the_object->offset) < len) {
       if (the_object->blocking && the_object->timeout != 0) {
          printk("BLOCCA");
          mutex_unlock(&(the_object->operation_synchronizer));
@@ -335,17 +335,17 @@ retry_read:
          goto retry_read;
       }
       else {
-         len = the_object->valid_bytes_or_offest[the_object->priority] - *off;
+         len = the_object->valid_bytes_or_offest[the_object->priority] - the_object->offset;
          //printk("Thread cannot go to sleep because the timeout is set to 0");
       }
    }
-   ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][0]), len);
+   ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][the_object->offset]), len);
    //ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][*off]), len);
 
    the_object->valid_bytes_or_offest[the_object->priority] = the_object->valid_bytes_or_offest[the_object->priority] - (len - ret);
 
    // potreesti lavorare in buffer circolare => servono due indici (offset e validBytes)
-   ret = re_write_buffer(the_object->stream_content[the_object->priority], *off, len);
+   ret = re_write_buffer(the_object->stream_content[the_object->priority], the_object->offset, len);
    if (ret != 0) {
       printk("Error in re_write_buffer");
    }
