@@ -60,7 +60,7 @@ typedef struct _object_state{
 	struct mutex object_busy;
 #endif
 	struct mutex operation_synchronizer;
-	int valid_bytes_or_offest[2];
+	int valid_bytes[2];
    int offset[2];
 	char* stream_content[2];    //the I/O node is a buffer in memory
    enum priority priority;
@@ -269,17 +269,17 @@ retry_write:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
-   if(the_object->offset >= OBJECT_MAX_SIZE) {    //offset too large
+   if(*off >= OBJECT_MAX_SIZE) {    //offset too large
       mutex_unlock(&(the_object->operation_synchronizer));
       return -ENOSPC;      //no space left on device
    } 
 
-   if(the_object->offset > the_object->valid_bytes_or_offest[the_object->priority]) {      //offset beyond the current stream size
+   if(*off > the_object->valid_bytes[the_object->priority]) {      //offset beyond the current stream size
       mutex_unlock(&(the_object->operation_synchronizer));
       return -ENOSR;    //out of stream resources
    } 
 
-   if((OBJECT_MAX_SIZE - the_object->offset) < len) {
+   if((OBJECT_MAX_SIZE - the_object->valid_bytes[the_object->priority]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
       if (!the_object->blocking) {
          //len = OBJECT_MAX_SIZE - *off;
@@ -292,14 +292,13 @@ retry_write:
       }
    }
    if (the_object->priority == HIGH_PRIORITY) {
-      ret = copy_from_user(&(the_object->stream_content[the_object->priority][the_object->valid_bytes_or_offest[the_object->priority]]),
+      ret = copy_from_user(&(the_object->stream_content[the_object->priority][the_object->valid_bytes[the_object->priority]+the_object->offset[the_object->priority]]),
             buff, len);
    }
    else {
       printk("CIAO");
    }  
-   the_object->offset += (len - ret);
-   the_object->valid_bytes_or_offest[the_object->priority] += the_object->offset;
+   the_object->valid_bytes[the_object->priority] += (len - ret);
 
    mutex_unlock(&(the_object->operation_synchronizer));
 
@@ -321,12 +320,12 @@ retry_read:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
-   if(the_object->offset > the_object->valid_bytes_or_offest[the_object->priority]) {
+   if(*off > the_object->valid_bytes[the_object->priority]) {
  	   mutex_unlock(&(the_object->operation_synchronizer));
 	   return 0;
    } 
 
-   if((the_object->valid_bytes_or_offest[the_object->priority] - the_object->offset) < len) {
+   if((the_object->valid_bytes[the_object->priority]) < len) {
       if (the_object->blocking && the_object->timeout != 0) {
          printk("BLOCCA");
          mutex_unlock(&(the_object->operation_synchronizer));
@@ -335,20 +334,21 @@ retry_read:
          goto retry_read;
       }
       else {
-         len = the_object->valid_bytes_or_offest[the_object->priority] - the_object->offset;
+         len = the_object->valid_bytes[the_object->priority];
          //printk("Thread cannot go to sleep because the timeout is set to 0");
       }
    }
-   ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][the_object->offset]), len);
+   ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][the_object->offset[the_object->priority]]), len);
    //ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][*off]), len);
 
-   the_object->valid_bytes_or_offest[the_object->priority] = the_object->valid_bytes_or_offest[the_object->priority] - (len - ret);
+   the_object->valid_bytes[the_object->priority] -= (len - ret);
+   the_object->offset[the_object->priority] += (len - ret);
 
    // potreesti lavorare in buffer circolare => servono due indici (offset e validBytes)
-   ret = re_write_buffer(the_object->stream_content[the_object->priority], the_object->offset, len);
+   /*ret = re_write_buffer(the_object->stream_content[the_object->priority], the_object->offset, len);
    if (ret != 0) {
       printk("Error in re_write_buffer");
-   }
+   }*/
 
    mutex_unlock(&(the_object->operation_synchronizer));
 
@@ -439,8 +439,8 @@ int init_module(void) {
 #endif
 		mutex_init(&(objects[i].operation_synchronizer));
       objects[i].priority = HIGH_PRIORITY;
-		objects[i].valid_bytes_or_offest[0] = 0;
-      objects[i].valid_bytes_or_offest[1] = 0;
+		objects[i].valid_bytes[0] = 0;
+      objects[i].valid_bytes[1] = 0;
 		objects[i].stream_content[0] = NULL;
 		objects[i].stream_content[0] = (char*)__get_free_page(GFP_KERNEL);
       objects[i].stream_content[1] = NULL;
