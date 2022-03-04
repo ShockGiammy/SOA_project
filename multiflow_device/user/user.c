@@ -53,11 +53,19 @@ int call_ioctl(int fd) {
 	decision = strtol(cmd, NULL, 10);
 	switch(decision) {
 		case 1:
-			ioctl(fd,0);
+			ret = ioctl(fd,0);
+			if (ret == -1) {
+				printf("An error is occured");
+				return -1;
+			}
 			printf("Priority level set to HIGH\n");
 			break;
 		case 2:
-			ioctl(fd,1);
+			ret = ioctl(fd,1);
+			if (ret == -1) {
+				printf("An error is occured");
+				return -1;
+			}
 			printf("Priority level set to LOW\n");
 			break;
 		case 3:
@@ -65,16 +73,24 @@ int call_ioctl(int fd) {
 			fgets(time, 4096, stdin);
 			int timeout = strtol(time, NULL, 10);
 
-			ioctl(fd,3);
+			ret = ioctl(fd,3);
+			if (ret == -1) {
+				printf("An error is occured");
+				return -1;
+			}
 			//ioctl(fd, 2, TIMEOUT QUI);
 			printf("Operations are BLOCKING and timeout is set to the value %d ms\n", timeout);
 			break;
 		case 4:
-			ioctl(fd,4);
+			ret = ioctl(fd,4);
+			if (ret == -1) {
+				printf("An error is occured");
+				return -1;
+			}
 			printf("Operations are NON-BLOCKING\n");
 			break;
 		default:
-			printf("Unkown option");
+			printf("Unknown option");
 			break;
 	}
 	return 0;

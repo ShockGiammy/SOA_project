@@ -160,7 +160,6 @@ static enum hrtimer_restart my_hrtimer_callback( struct hrtimer *timer ){
    return HRTIMER_NORESTART;
 }
 
-#define CLASSIC
 
 long goto_sleep(object_state *the_object){
 
@@ -259,6 +258,8 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
 
    int minor = get_minor(filp);
    int ret;
+   int temp_ret;
+   int offset;
    object_state *the_object;
 
    the_object = objects + minor;
@@ -282,7 +283,6 @@ retry_write:
    if((OBJECT_MAX_SIZE - the_object->valid_bytes[the_object->priority]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
       if (!the_object->blocking) {
-         //len = OBJECT_MAX_SIZE - *off;
          return -ENOSPC;      //no space left on device
       }
       else {
@@ -291,13 +291,34 @@ retry_write:
          goto retry_write;
       }
    }
-   if (the_object->priority == HIGH_PRIORITY) {
-      ret = copy_from_user(&(the_object->stream_content[the_object->priority][the_object->valid_bytes[the_object->priority]+the_object->offset[the_object->priority]]),
-            buff, len);
+   offset = the_object->valid_bytes[the_object->priority] + the_object->offset[the_object->priority];
+   if (len + offset >= OBJECT_MAX_SIZE) {
+      // buffer is a the end
+      if (the_object->priority == HIGH_PRIORITY) {
+
+         // scrivo tanti byte quanti necessari a riempire il buffer
+         temp_ret = copy_from_user(&(the_object->stream_content[the_object->priority][offset]),
+            buff, OBJECT_MAX_SIZE - offset);
+
+         // e rinizio a scrivere dall'inizio
+         ret = copy_from_user(&(the_object->stream_content[the_object->priority][0]),
+            buff, len - (OBJECT_MAX_SIZE - offset));
+
+         ret = ret + temp_ret;
+      }
+      else {
+         printk("CIAO");
+      }  
    }
    else {
-      printk("CIAO");
-   }  
+      if (the_object->priority == HIGH_PRIORITY) {
+      ret = copy_from_user(&(the_object->stream_content[the_object->priority][offset]),
+            buff, len);
+      }
+      else {
+         printk("CIAO");
+      }  
+   }
    the_object->valid_bytes[the_object->priority] += (len - ret);
 
    mutex_unlock(&(the_object->operation_synchronizer));
@@ -310,6 +331,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
 
    int minor = get_minor(filp);
    int ret;
+   int temp_ret;
    object_state *the_object;
 
    the_object = objects + minor;
@@ -330,7 +352,6 @@ retry_read:
          printk("BLOCCA");
          mutex_unlock(&(the_object->operation_synchronizer));
          goto_sleep(the_object);
-         //mutex_lock(&(the_object->operation_synchronizer));
          goto retry_read;
       }
       else {
@@ -338,13 +359,25 @@ retry_read:
          //printk("Thread cannot go to sleep because the timeout is set to 0");
       }
    }
-   ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][the_object->offset[the_object->priority]]), len);
-   //ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][*off]), len);
+   if (the_object->offset[the_object->priority] + len >= OBJECT_MAX_SIZE) {
+
+      temp_ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][the_object->offset[the_object->priority]]), 
+         OBJECT_MAX_SIZE - the_object->offset[the_object->priority]);
+
+      ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][0]), 
+         len - (OBJECT_MAX_SIZE - the_object->offset[the_object->priority]));
+
+      ret = ret + temp_ret;
+
+   } 
+   else {
+      ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority][the_object->offset[the_object->priority]]), len);
+   }
 
    the_object->valid_bytes[the_object->priority] -= (len - ret);
-   the_object->offset[the_object->priority] += (len - ret);
+   the_object->offset[the_object->priority] = (the_object->offset[the_object->priority] + (len - ret)) % OBJECT_MAX_SIZE;
 
-   // potreesti lavorare in buffer circolare => servono due indici (offset e validBytes)
+   // potresti lavorare in buffer circolare => servono due indici (offset e validBytes)
    /*ret = re_write_buffer(the_object->stream_content[the_object->priority], the_object->offset, len);
    if (ret != 0) {
       printk("Error in re_write_buffer");
