@@ -175,7 +175,7 @@ int main(int argc, char** argv){
 					int len = strtol(data, NULL, 10);
 					ret = read(fd, buff, len);
 					if (ret == -1) {
-						printf("Error in read operation\n");
+						printf("Not enough data to read\n");
 					}
 					else {
 						printf("%d bytes are correctly read from device %s\n", ret, device);

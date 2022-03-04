@@ -22,13 +22,20 @@ MODULE_AUTHOR("Gian Marco Falcone");
 
 #define AUDIT if(1)
 
+unsigned long the_hook;
+module_param(the_hook,ulong,0660);//beware this
+
+unsigned long hook_func = 0;
+module_param(hook_func, ulong, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
+
+unsigned long audit_counter = 0;
+module_param(audit_counter, ulong, S_IRUSR | S_IRGRP | S_IROTH);
+
 static int dev_open(struct inode *, struct file *);
 static int dev_release(struct inode *, struct file *);
 static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
 static ssize_t dev_read(struct file *, char *, size_t, loff_t *);
 static ssize_t dev_ioctl(struct file *, unsigned int, unsigned long);
-int re_write_buffer(char *buffer, size_t off, size_t len);
-bool test_float(const char *str);
 
 #define DEVICE_NAME "my-new-dev"  /* Device file name in /dev/ - not mandatory  */
 
@@ -74,8 +81,9 @@ object_state objects[MINORS];
 #define OBJECT_MAX_SIZE  (4096) //just one page
 
 typedef struct _packed_work{
-   void* buffer;
-   long code;
+   object_state *the_object;
+   char *buffer;
+   size_t len;
    struct work_struct the_work;
 } packed_work;
 
@@ -86,73 +94,12 @@ typedef struct _control_record{
    struct hrtimer hr_timer;
 } control_record;
 
-
-void audit(unsigned long data){
-
-   AUDIT{
-      printk("%s: ------------------------------\n",MODNAME);
-      printk("%s: this print comes from kworker daemon with PID=%d - running on CPU-core %d\n",MODNAME,current->pid,smp_processor_id());
-   }
-
-   AUDIT
-   printk("%s: running task with code  %ld\n",MODNAME,container_of((void*)data,packed_work,the_work)->code);
-
-   AUDIT
-   printk("%s: releasing the task buffer at address %p - container of task is at %p\n",MODNAME,(void*)data,container_of((void*)data,packed_work,the_work));
-
-   kfree((void*)container_of((void*)data,packed_work,the_work));
-
-   module_put(THIS_MODULE);
-
-}
-
-
-int put_work(int core, int request_code){
-   
-   packed_work *the_task;
-
-	if(core >= num_online_cpus()) {
-      return -ENODEV;
-   }
-
-   if(!try_module_get(THIS_MODULE)) {
-      return -ENODEV;
-   }
-
-   AUDIT{
-      printk("%s: ------------------------\n",MODNAME);
-      printk("%s: requested deferred work with request code: %d\n",MODNAME,request_code);
-   }
-
-   the_task = kzalloc(sizeof(packed_work),GFP_ATOMIC);     //non blocking memory allocation
-
-   if (the_task == NULL) {
-      printk("%s: tasklet buffer allocation failure\n",MODNAME);
-      module_put(THIS_MODULE);
-      return -1;
-   }
-
-   the_task->buffer = the_task;
-   the_task->code = request_code;
-
-   AUDIT
-   printk("%s: work buffer allocation success - address is %p\n",MODNAME,the_task);
-
-
-   __INIT_WORK(&(the_task->the_work), (void*)audit, (unsigned long)(&(the_task->the_work)));
-
-   schedule_work_on(core, &the_task->the_work);
-
-   return 0;
-}
-
-
-static enum hrtimer_restart my_hrtimer_callback( struct hrtimer *timer ){
+static enum hrtimer_restart my_hrtimer_callback(struct hrtimer *timer){
 
    control_record *control;
    struct task_struct *the_task;
 
-   control = (control_record*)container_of(timer,control_record, hr_timer);
+   control = (control_record*)container_of(timer, control_record, hr_timer);
    control->awake = YES;
    the_task = control->task;
    wake_up_process(the_task);
@@ -166,22 +113,21 @@ long goto_sleep(object_state *the_object){
 	control_record data;
    control_record* control;
    ktime_t ktime_interval;
-   DECLARE_WAIT_QUEUE_HEAD(the_queue);//here we use a private queue - wakeup is selective via wake_up_process
+   DECLARE_WAIT_QUEUE_HEAD(the_queue);    //here we use a private queue - wakeup is selective via wake_up_process
 
    if(the_object->timeout == 0) {
-      return 0;
+      return -1;
    }
 
-   control = &data;//set the pointer to the current stack area
+   control = &data;     //set the pointer to the current stack area
 
    AUDIT
    printk("%s: thread %d going to usleep for %lu millisecs\n", MODNAME, current->pid, the_object->timeout);
 
    ktime_interval = ktime_set(0, the_object->timeout*1000000);
 
-   //CLASSIC
-   //control->awake = NO;
-   //wait_event_interruptible_hrtimeout(the_queue, control->awake == YES, ktime_interval);
+   /*control->awake = NO;
+   wait_event_interruptible_hrtimeout(the_queue, control->awake == YES, ktime_interval);*/
 
    control->task = current;
    control->pid  = current->pid;
@@ -202,6 +148,103 @@ long goto_sleep(object_state *the_object){
    if(unlikely(control->awake != YES)) {
       return -1;
    }
+   return 0;
+}
+
+
+void asynchronous_write(unsigned long data){
+
+   object_state *the_object = container_of((void*)data,packed_work,the_work)->the_object;
+   char *buff = container_of((void*)data,packed_work,the_work)->buffer;
+   size_t len = container_of((void*)data,packed_work,the_work)->len;
+   int ret;
+   int offset;
+
+   AUDIT{
+   printk("%s: this print comes from kworker daemon with PID=%d - running on CPU-core %d\n", MODNAME, current->pid, smp_processor_id());
+   printk("%s: releasing the task buffer at address %p \n",MODNAME, (void*)data);
+   }
+
+   printk("%s: somebody called a write on dev \n", MODNAME);
+
+retry_write2:
+   //need to lock in any case
+   mutex_lock(&(the_object->operation_synchronizer));
+
+   if((OBJECT_MAX_SIZE - the_object->valid_bytes[the_object->priority]) < len) {
+      mutex_unlock(&(the_object->operation_synchronizer));
+      if (the_object->blocking && the_object->timeout != 0) {
+         goto_sleep(the_object);
+         goto retry_write2;
+      }
+      else {
+         return;      //no space left on device
+      }
+   }
+   offset = the_object->valid_bytes[the_object->priority] + the_object->offset[the_object->priority];
+   if (len + offset >= OBJECT_MAX_SIZE) {
+      // buffer is a the end
+      // scrivo tanti byte quanti necessari a riempire il buffer
+      ret = copy_from_user(&(the_object->stream_content[the_object->priority][offset]),
+         buff, OBJECT_MAX_SIZE - offset);
+      if (ret != 0) {
+         printk("%s: There was an error in the write\n", MODNAME);
+      }
+
+      // e rinizio a scrivere dall'inizio
+      ret = copy_from_user(&(the_object->stream_content[the_object->priority][0]),
+         buff, len - (OBJECT_MAX_SIZE - offset));
+      if (ret != 0) {
+         printk("%s: There was an error in the write\n", MODNAME);
+      }
+   }
+   else {
+      ret = copy_from_user(&(the_object->stream_content[the_object->priority][offset]),
+            buff, len);
+      if (ret != 0) {
+         printk("%s: There was an error in the write\n", MODNAME);
+      }
+   }
+   //the_object->valid_bytes[the_object->priority] += (len - ret);
+
+   mutex_unlock(&(the_object->operation_synchronizer));
+
+   kfree((void*)data);
+   module_put(THIS_MODULE);
+   return;
+}
+
+
+int put_work(object_state *the_object, const char *buff, size_t len){
+   
+   packed_work *the_task;
+
+   if(!try_module_get(THIS_MODULE)) {
+      return -ENODEV;
+   }
+
+   AUDIT{
+      printk("%s: requested deferred work\n", MODNAME);
+   }
+
+   the_task = kzalloc(sizeof(packed_work), GFP_ATOMIC);     //non blocking memory allocation
+
+   if (the_task == NULL) {
+      printk("%s: tasklet buffer allocation failure\n",MODNAME);
+      module_put(THIS_MODULE);
+      return -1;
+   }
+
+   the_task->buffer = (char*)buff;
+   the_task->the_object = the_object;
+   the_task->len = len;
+
+   AUDIT
+   printk("%s: work buffer allocation success - address is %p\n", MODNAME, the_task);
+
+   __INIT_WORK(&(the_task->the_work), (void*)asynchronous_write, (unsigned long)(&(the_task->the_work)));
+   schedule_work(&the_task->the_work);
+
    return 0;
 }
 
@@ -281,7 +324,6 @@ retry_write:
       mutex_unlock(&(the_object->operation_synchronizer));
       if (the_object->blocking && the_object->timeout != 0) {
          goto_sleep(the_object);
-         printk("BLOCCA");
          goto retry_write;
       }
       else {
@@ -304,16 +346,24 @@ retry_write:
          ret = ret + temp_ret;
       }
       else {
-         printk("CIAO");
+         ret = put_work(the_object, buff, len);
+         if (ret != 0) {
+            printk("There was an error with deferred work\n");
+            return -1;
+         }
       }  
    }
    else {
       if (the_object->priority == HIGH_PRIORITY) {
-      ret = copy_from_user(&(the_object->stream_content[the_object->priority][offset]),
+         ret = copy_from_user(&(the_object->stream_content[the_object->priority][offset]),
             buff, len);
       }
       else {
-         printk("CIAO");
+         ret = put_work(the_object, buff, len);
+         if (ret != 0) {
+            printk("There was an error with deferred work\n");
+            return -1;
+         }
       }  
    }
    the_object->valid_bytes[the_object->priority] += (len - ret);
@@ -341,12 +391,11 @@ retry_read:
 
    if(*off > the_object->valid_bytes[the_object->priority]) {
  	   mutex_unlock(&(the_object->operation_synchronizer));
-	   return 0;
+	   return -1;
    } 
 
    if((the_object->valid_bytes[the_object->priority]) < len) {
       if (the_object->blocking && the_object->timeout != 0) {
-         printk("BLOCCA");
          mutex_unlock(&(the_object->operation_synchronizer));
          goto_sleep(the_object);
          goto retry_read;
@@ -375,12 +424,6 @@ retry_read:
 
    the_object->valid_bytes[the_object->priority] -= (len - ret);
    the_object->offset[the_object->priority] = (the_object->offset[the_object->priority] + (len - ret)) % OBJECT_MAX_SIZE;
-
-   // potresti lavorare in buffer circolare => servono due indici (offset e validBytes)
-   /*ret = re_write_buffer(the_object->stream_content[the_object->priority], the_object->offset, len);
-   if (ret != 0) {
-      printk("Error in re_write_buffer");
-   }*/
 
    mutex_unlock(&(the_object->operation_synchronizer));
 
@@ -433,35 +476,9 @@ static struct file_operations fops = {
 };
 
 
-int re_write_buffer(char *buffer, size_t off, size_t len) {
-
-   int i;
-   if (len != 0) {
-      for (i = 0; i < OBJECT_MAX_SIZE - len; i++) {
-         buffer[i] = buffer[len+i];
-      }
-   }
-   return 0;
-}
-
-
-/*bool test_float(const char *str)
-{
-    int len;
-    float dummy = 0.0;
-    if (sscanf(str, "%f %n", &dummy, &len) == 1 && len == (int)strlen(str))
-        //printf("[%s] is valid (%.7g)\n", str, dummy);
-        return true;
-    else
-        //printf("[%s] is not valid (%.7g)\n", str, dummy);
-        return false;
-}*/
-
-
 int init_module(void) {
 
 	int i;
-   //int ret;
 
 	//initialize the drive internal state
 	for(i=0;i<MINORS;i++){
