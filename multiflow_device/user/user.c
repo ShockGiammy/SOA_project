@@ -53,7 +53,7 @@ int call_ioctl(int fd) {
 	decision = strtol(cmd, NULL, 10);
 	switch(decision) {
 		case 1:
-			ret = ioctl(fd,0);
+			ret = ioctl(fd, 0);
 			if (ret == -1) {
 				printf("An error is occured");
 				return -1;
@@ -61,7 +61,7 @@ int call_ioctl(int fd) {
 			printf("Priority level set to HIGH\n");
 			break;
 		case 2:
-			ret = ioctl(fd,1);
+			ret = ioctl(fd, 1);
 			if (ret == -1) {
 				printf("An error is occured");
 				return -1;
@@ -69,20 +69,29 @@ int call_ioctl(int fd) {
 			printf("Priority level set to LOW\n");
 			break;
 		case 3:
-			printf("You need to choose the wake up timeout\n	Insert a valid time (microsecond):");
-			fgets(time, 4096, stdin);
-			int timeout = strtol(time, NULL, 10);
-
-			ret = ioctl(fd,3);
+			printf("You need to choose the wake up timeout\n	Insert a valid time (millisecond):");
+			fgets(time, 50, stdin);
+			unsigned long timeout = strtol(time, NULL, 10);
+			while(timeout == 0) {
+				memset(time, 0, sizeof(char)*(strlen(time)+1));
+				printf("Please insert a valid time:\n");
+				fgets(time, 50, stdin);
+				unsigned long timeout = strtol(time, NULL, 10);
+			}
+			ret = ioctl(fd, 3);
 			if (ret == -1) {
-				printf("An error is occured");
+				printf("An error is occured in setting BLOCKING mode");
 				return -1;
 			}
-			//ioctl(fd, 2, TIMEOUT QUI);
-			printf("Operations are BLOCKING and timeout is set to the value %d ms\n", timeout);
+			ret = ioctl(fd, 5, timeout);
+			if (ret == -1) {
+				printf("An error is occured in setting the timeout");
+				return -1;
+			}
+			printf("Operations are BLOCKING and timeout is set to the value %ld ms\n", timeout);
 			break;
 		case 4:
-			ret = ioctl(fd,4);
+			ret = ioctl(fd, 4);
 			if (ret == -1) {
 				printf("An error is occured");
 				return -1;

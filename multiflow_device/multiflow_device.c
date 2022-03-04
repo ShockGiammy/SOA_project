@@ -32,7 +32,7 @@ bool test_float(const char *str);
 
 #define DEVICE_NAME "my-new-dev"  /* Device file name in /dev/ - not mandatory  */
 
-#define SINGLE_SESSION_OBJECT //just one session per I/O node at a time
+//#define SINGLE_SESSION_OBJECT //just one session per I/O node at a time
 
 static int Major;            /* Major number assigned to broadcast device driver */
 
@@ -48,9 +48,9 @@ enum priority{
    HIGH_PRIORITY,    //0 if high priority
    LOW_PRIORITY      //1 if low priority
 };
-#define TIMEOUT 2
 #define BLOCKING 3
 #define NON_BLOCKING 4
+#define TIMEOUT 5
 
 #define NO (0)
 #define YES (NO+1)
@@ -175,9 +175,9 @@ long goto_sleep(object_state *the_object){
    control = &data;//set the pointer to the current stack area
 
    AUDIT
-   printk("%s: thread %d going to usleep for %lu microsecs\n", MODNAME, current->pid, the_object->timeout);
+   printk("%s: thread %d going to usleep for %lu millisecs\n", MODNAME, current->pid, the_object->timeout);
 
-   ktime_interval = ktime_set(0, the_object->timeout*1000);
+   ktime_interval = ktime_set(0, the_object->timeout*1000000);
 
    //CLASSIC
    //control->awake = NO;
@@ -191,8 +191,7 @@ long goto_sleep(object_state *the_object){
 
    control->hr_timer.function = &my_hrtimer_callback;
    hrtimer_start(&(control->hr_timer), ktime_interval, HRTIMER_MODE_REL);
-
-            
+      
    wait_event_interruptible(the_queue, control->awake == YES);
 
    hrtimer_cancel(&(control->hr_timer));
@@ -203,9 +202,7 @@ long goto_sleep(object_state *the_object){
    if(unlikely(control->awake != YES)) {
       return -1;
    }
-
    return 0;
-
 }
 
 
@@ -282,13 +279,13 @@ retry_write:
 
    if((OBJECT_MAX_SIZE - the_object->valid_bytes[the_object->priority]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
-      if (!the_object->blocking) {
-         return -ENOSPC;      //no space left on device
-      }
-      else {
+      if (the_object->blocking && the_object->timeout != 0) {
          goto_sleep(the_object);
          printk("BLOCCA");
          goto retry_write;
+      }
+      else {
+         return -ENOSPC;      //no space left on device
       }
    }
    offset = the_object->valid_bytes[the_object->priority] + the_object->offset[the_object->priority];
@@ -355,8 +352,10 @@ retry_read:
          goto retry_read;
       }
       else {
-         len = the_object->valid_bytes[the_object->priority];
-         //printk("Thread cannot go to sleep because the timeout is set to 0");
+         //len = the_object->valid_bytes[the_object->priority];
+         printk("Not enough data to read\n");
+         mutex_unlock(&(the_object->operation_synchronizer));
+         return -1;      //no enough data on device
       }
    }
    if (the_object->offset[the_object->priority] + len >= OBJECT_MAX_SIZE) {
@@ -406,16 +405,15 @@ static long dev_ioctl(struct file *filp, unsigned int command, unsigned long par
          case LOW_PRIORITY:
             the_object->priority = LOW_PRIORITY;
             break;
-         case TIMEOUT:
-            //if (test_float(param)) {
-            the_object->timeout = param;
-            //}
-            break;
          case BLOCKING:
             the_object->blocking = true;
             break;
          case NON_BLOCKING:
             the_object->blocking = false;
+            break;
+         case TIMEOUT:
+            the_object->timeout = param;
+            printk("Timeout is set to %ld\n", the_object->timeout);
             break;
          default:
             printk("Unknown operation\n");
@@ -447,7 +445,7 @@ int re_write_buffer(char *buffer, size_t off, size_t len) {
 }
 
 
-bool test_float(const char *str)
+/*bool test_float(const char *str)
 {
     int len;
     float dummy = 0.0;
@@ -457,7 +455,7 @@ bool test_float(const char *str)
     else
         //printf("[%s] is not valid (%.7g)\n", str, dummy);
         return false;
-}
+}*/
 
 
 int init_module(void) {
