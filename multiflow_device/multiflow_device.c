@@ -153,11 +153,13 @@ long goto_sleep(object_state *the_object){
 
 
 void asynchronous_write(unsigned long data){
+   // DA RISOLVERE! ROMPE TUTTO DOPO
 
    object_state *the_object = container_of((void*)data,packed_work,the_work)->the_object;
    char *buff = container_of((void*)data,packed_work,the_work)->buffer;
    size_t len = container_of((void*)data,packed_work,the_work)->len;
    int ret;
+   int temp_ret;
    int offset;
 
    AUDIT{
@@ -178,6 +180,7 @@ retry_write2:
          goto retry_write2;
       }
       else {
+         printk("%s: No space left on device\n", MODNAME);
          return;      //no space left on device
       }
    }
@@ -185,9 +188,9 @@ retry_write2:
    if (len + offset >= OBJECT_MAX_SIZE) {
       // buffer is a the end
       // scrivo tanti byte quanti necessari a riempire il buffer
-      ret = copy_from_user(&(the_object->stream_content[the_object->priority][offset]),
+      temp_ret = copy_from_user(&(the_object->stream_content[the_object->priority][offset]),
          buff, OBJECT_MAX_SIZE - offset);
-      if (ret != 0) {
+      if (temp_ret != 0) {
          printk("%s: There was an error in the write\n", MODNAME);
       }
 
@@ -197,6 +200,7 @@ retry_write2:
       if (ret != 0) {
          printk("%s: There was an error in the write\n", MODNAME);
       }
+      ret = ret + temp_ret;
    }
    else {
       ret = copy_from_user(&(the_object->stream_content[the_object->priority][offset]),
@@ -205,11 +209,11 @@ retry_write2:
          printk("%s: There was an error in the write\n", MODNAME);
       }
    }
-   //the_object->valid_bytes[the_object->priority] += (len - ret);
+   the_object->valid_bytes[the_object->priority] += (len - ret);
 
    mutex_unlock(&(the_object->operation_synchronizer));
 
-   kfree((void*)data);
+   kfree(container_of((void*)data,packed_work,the_work));
    module_put(THIS_MODULE);
    return;
 }
@@ -344,11 +348,12 @@ retry_write:
             buff, len - (OBJECT_MAX_SIZE - offset));
 
          ret = ret + temp_ret;
+         the_object->valid_bytes[the_object->priority] += (len - ret);
       }
       else {
          ret = put_work(the_object, buff, len);
          if (ret != 0) {
-            printk("There was an error with deferred work\n");
+            printk("%s: There was an error with deferred work\n", MODNAME);
             return -1;
          }
       }  
@@ -357,16 +362,16 @@ retry_write:
       if (the_object->priority == HIGH_PRIORITY) {
          ret = copy_from_user(&(the_object->stream_content[the_object->priority][offset]),
             buff, len);
+         the_object->valid_bytes[the_object->priority] += (len - ret);
       }
       else {
          ret = put_work(the_object, buff, len);
          if (ret != 0) {
-            printk("There was an error with deferred work\n");
+            printk("%s: There was an error with deferred work\n", MODNAME);
             return -1;
          }
       }  
    }
-   the_object->valid_bytes[the_object->priority] += (len - ret);
 
    mutex_unlock(&(the_object->operation_synchronizer));
 
@@ -401,8 +406,7 @@ retry_read:
          goto retry_read;
       }
       else {
-         //len = the_object->valid_bytes[the_object->priority];
-         printk("Not enough data to read\n");
+         printk("%s: Not enough data to read\n", MODNAME);
          mutex_unlock(&(the_object->operation_synchronizer));
          return -1;      //no enough data on device
       }
@@ -456,10 +460,10 @@ static long dev_ioctl(struct file *filp, unsigned int command, unsigned long par
             break;
          case TIMEOUT:
             the_object->timeout = param;
-            printk("Timeout is set to %ld\n", the_object->timeout);
+            printk("%s: Timeout is set to %ld\n", MODNAME, the_object->timeout);
             break;
          default:
-            printk("Unknown operation\n");
+            printk("%s: Unknown operation\n", MODNAME);
             break;
    }
    return 0;
