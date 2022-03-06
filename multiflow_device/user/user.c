@@ -24,6 +24,7 @@ int open_device(char* device);
 
 
 int open_device(char* device) {
+
 	int fd;
 
 	printf("opening device %s\n", device);
