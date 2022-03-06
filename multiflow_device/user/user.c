@@ -49,13 +49,15 @@ int call_ioctl(int fd) {
 	printf("2) Change the priority level to LOW\n");
 	printf("3) Set the BLOCKING operation mode\n");
 	printf("4) Set the NON-BLOCKING operation mode\n");
+	printf("5) DISABLE the device\n");
+	printf("6) ENABLE the device\n");
 	fgets(cmd, 3, stdin);
 	decision = strtol(cmd, NULL, 10);
 	switch(decision) {
 		case 1:
 			ret = ioctl(fd, 0);
 			if (ret == -1) {
-				printf("An error is occured");
+				printf("An error is occured\n");
 				return -1;
 			}
 			printf("Priority level set to HIGH\n");
@@ -63,7 +65,7 @@ int call_ioctl(int fd) {
 		case 2:
 			ret = ioctl(fd, 1);
 			if (ret == -1) {
-				printf("An error is occured");
+				printf("An error is occured\n");
 				return -1;
 			}
 			printf("Priority level set to LOW\n");
@@ -80,12 +82,12 @@ int call_ioctl(int fd) {
 			}
 			ret = ioctl(fd, 3);
 			if (ret == -1) {
-				printf("An error is occured in setting BLOCKING mode");
+				printf("An error is occured in setting BLOCKING mode\n");
 				return -1;
 			}
 			ret = ioctl(fd, 5, timeout);
 			if (ret == -1) {
-				printf("An error is occured in setting the timeout");
+				printf("An error is occured in setting the timeout\n");
 				return -1;
 			}
 			printf("Operations are BLOCKING and timeout is set to the value %ld ms\n", timeout);
@@ -98,8 +100,25 @@ int call_ioctl(int fd) {
 			}
 			printf("Operations are NON-BLOCKING\n");
 			break;
+		case 5:
+			ret = ioctl(fd, 7);
+			if (ret == -1) {
+				printf("An error is occured\n");
+				return -1;
+			}
+			printf("Device is disabled. It's not possible to open new sessions to the device\n");
+			printf("Open sessions will be still managed\n");
+			break;
+		case 6:
+			ret = ioctl(fd, 6);
+			if (ret == -1) {
+				printf("An error is occured\n");
+				return -1;
+			}
+			printf("Device is ready to receive new sessions again\n");
+			break;
 		default:
-			printf("Unknown option");
+			printf("Unknown option\n");
 			break;
 	}
 	return 0;

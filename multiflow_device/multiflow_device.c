@@ -22,14 +22,26 @@ MODULE_AUTHOR("Gian Marco Falcone");
 
 #define AUDIT if(1)
 
-unsigned long the_hook;
-module_param(the_hook,ulong,0660);//beware this
+#define MINORS 128
 
-unsigned long hook_func = 0;
-module_param(hook_func, ulong, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
+int enabled[MINORS];
+module_param_array(enabled, int, NULL, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+//module_param(enabled, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);    //beware this
+//S_IROTH = lettura per altri
+//S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP = 0660
 
-unsigned long audit_counter = 0;
-module_param(audit_counter, ulong, S_IRUSR | S_IRGRP | S_IROTH);
+long high_priority_valid_bytes[MINORS];
+module_param_array(high_priority_valid_bytes, long, NULL, S_IRUSR | S_IRGRP);
+
+long high_priority_waiting_threads[MINORS];
+module_param_array(high_priority_waiting_threads, long, NULL, S_IRUSR | S_IRGRP);
+
+long low_priority_valid_bytes[MINORS];
+module_param_array(low_priority_valid_bytes, long, NULL, S_IRUSR | S_IRGRP);
+
+long low_priority_waiting_threads[MINORS];
+module_param_array(low_priority_waiting_threads, long, NULL, S_IRUSR | S_IRGRP);
+
 
 static int dev_open(struct inode *, struct file *);
 static int dev_release(struct inode *, struct file *);
@@ -58,6 +70,8 @@ enum priority{
 #define BLOCKING 3
 #define NON_BLOCKING 4
 #define TIMEOUT 5
+#define ENABLE 6
+#define DISABLE 7
 
 #define NO (0)
 #define YES (NO+1)
@@ -75,7 +89,6 @@ typedef struct _object_state{
    unsigned long timeout;
 } object_state;
 
-#define MINORS 128
 object_state objects[MINORS];
 
 #define OBJECT_MAX_SIZE  (4096) //just one page
@@ -84,6 +97,7 @@ typedef struct _packed_work{
    object_state *the_object;
    char *buffer;
    size_t len;
+   struct file *filp;
    struct work_struct the_work;
 } packed_work;
 
@@ -91,8 +105,11 @@ typedef struct _control_record{
    struct task_struct *task;       
    int pid;
    int awake;
+   int minor;
+   int priority;
    struct hrtimer hr_timer;
 } control_record;
+
 
 static enum hrtimer_restart my_hrtimer_callback(struct hrtimer *timer){
 
@@ -103,12 +120,18 @@ static enum hrtimer_restart my_hrtimer_callback(struct hrtimer *timer){
    control->awake = YES;
    the_task = control->task;
    wake_up_process(the_task);
+   if (control->priority == 0) {
+      high_priority_waiting_threads[control->minor] -= 1;
+   }
+   else {
+      low_priority_waiting_threads[control->minor] -= 1;
+   }
 
    return HRTIMER_NORESTART;
 }
 
 
-long goto_sleep(object_state *the_object){
+long goto_sleep(object_state *the_object, int minor, int priority){
 
 	control_record data;
    control_record* control;
@@ -126,12 +149,11 @@ long goto_sleep(object_state *the_object){
 
    ktime_interval = ktime_set(0, the_object->timeout*1000000);
 
-   /*control->awake = NO;
-   wait_event_interruptible_hrtimeout(the_queue, control->awake == YES, ktime_interval);*/
-
    control->task = current;
    control->pid  = current->pid;
    control->awake = NO;
+   control->minor = minor;
+   control->priority = priority;
 
    hrtimer_init(&(control->hr_timer), CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
@@ -139,6 +161,15 @@ long goto_sleep(object_state *the_object){
    hrtimer_start(&(control->hr_timer), ktime_interval, HRTIMER_MODE_REL);
       
    wait_event_interruptible(the_queue, control->awake == YES);
+
+   //Are taken into account both threads waiting to read and threads waiting to write.
+   //It is very unlikely that both are present at the same time.
+   if (the_object->priority == 0) {
+      high_priority_waiting_threads[minor] += 1;
+   }
+   else {
+      low_priority_waiting_threads[minor] += 1;
+   }
 
    hrtimer_cancel(&(control->hr_timer));
    
@@ -158,6 +189,7 @@ void asynchronous_write(unsigned long data){
    object_state *the_object = container_of((void*)data,packed_work,the_work)->the_object;
    char *buff = container_of((void*)data,packed_work,the_work)->buffer;
    size_t len = container_of((void*)data,packed_work,the_work)->len;
+   struct file *filp = container_of((void*)data,packed_work,the_work)->filp;
    int ret;
    int temp_ret;
    int offset;
@@ -167,7 +199,8 @@ void asynchronous_write(unsigned long data){
    printk("%s: releasing the task buffer at address %p \n",MODNAME, (void*)data);
    }
 
-   printk("%s: somebody called a write on dev \n", MODNAME);
+  printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
+            MODNAME, get_major(filp), get_minor(filp));
 
 retry_write2:
    //need to lock in any case
@@ -176,7 +209,7 @@ retry_write2:
    if((OBJECT_MAX_SIZE - the_object->valid_bytes[the_object->priority]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
       if (the_object->blocking && the_object->timeout != 0) {
-         goto_sleep(the_object);
+         goto_sleep(the_object, get_minor(filp), the_object->priority);
          goto retry_write2;
       }
       else {
@@ -209,7 +242,9 @@ retry_write2:
          printk("%s: There was an error in the write\n", MODNAME);
       }
    }
+
    the_object->valid_bytes[the_object->priority] += (len - ret);
+   low_priority_valid_bytes[get_minor(filp)] += (len - ret);
 
    mutex_unlock(&(the_object->operation_synchronizer));
 
@@ -219,7 +254,7 @@ retry_write2:
 }
 
 
-int put_work(object_state *the_object, const char *buff, size_t len){
+int put_work(object_state *the_object, const char *buff, size_t len, struct file *filp){
    
    packed_work *the_task;
 
@@ -242,6 +277,7 @@ int put_work(object_state *the_object, const char *buff, size_t len){
    the_task->buffer = (char*)buff;
    the_task->the_object = the_object;
    the_task->len = len;
+   the_task->filp = filp;
 
    AUDIT
    printk("%s: work buffer allocation success - address is %p\n", MODNAME, the_task);
@@ -261,7 +297,12 @@ static int dev_open(struct inode *inode, struct file *file) {
    minor = get_minor(file);
 
    if(minor >= MINORS){
-	return -ENODEV;
+	   return -ENODEV;
+   }
+
+   if (enabled[minor] == 0) {
+      printk("%s: device file is disabled for object with minor %d\n", MODNAME, minor);
+      return -EBUSY;
    }
 
 #ifdef SINGLE_SESSION_OBJECT
@@ -291,11 +332,12 @@ static int dev_release(struct inode *inode, struct file *file) {
    mutex_unlock(&(objects[minor].object_busy));
 #endif
 
+   enabled[minor] = 1;
+
    printk("%s: device file closed\n",MODNAME);
    //device closed by default nop
    return 0;
 }
-
 
 
 static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t *off) {
@@ -327,7 +369,7 @@ retry_write:
    if((OBJECT_MAX_SIZE - the_object->valid_bytes[the_object->priority]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
       if (the_object->blocking && the_object->timeout != 0) {
-         goto_sleep(the_object);
+         goto_sleep(the_object, minor, the_object->priority);
          goto retry_write;
       }
       else {
@@ -349,9 +391,11 @@ retry_write:
 
          ret = ret + temp_ret;
          the_object->valid_bytes[the_object->priority] += (len - ret);
+         high_priority_valid_bytes[minor] += (len - ret);
       }
       else {
-         ret = put_work(the_object, buff, len);
+         // potresti pensare di riservare dei byte! Credo serve altro campo nella struct
+         ret = put_work(the_object, buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
             return -1;
@@ -363,9 +407,11 @@ retry_write:
          ret = copy_from_user(&(the_object->stream_content[the_object->priority][offset]),
             buff, len);
          the_object->valid_bytes[the_object->priority] += (len - ret);
+         high_priority_valid_bytes[minor] += (len - ret);
       }
       else {
-         ret = put_work(the_object, buff, len);
+         // potresti pensare di riservare dei byte! Credo serve altro campo nella struct
+         ret = put_work(the_object, buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
             return -1;
@@ -402,7 +448,7 @@ retry_read:
    if((the_object->valid_bytes[the_object->priority]) < len) {
       if (the_object->blocking && the_object->timeout != 0) {
          mutex_unlock(&(the_object->operation_synchronizer));
-         goto_sleep(the_object);
+         goto_sleep(the_object, minor, the_object->priority);
          goto retry_read;
       }
       else {
@@ -428,6 +474,13 @@ retry_read:
 
    the_object->valid_bytes[the_object->priority] -= (len - ret);
    the_object->offset[the_object->priority] = (the_object->offset[the_object->priority] + (len - ret)) % OBJECT_MAX_SIZE;
+
+   if (the_object->priority == 0) {
+      high_priority_valid_bytes[minor] -= (len - ret);
+   }
+   else {
+      low_priority_valid_bytes[minor] -= (len - ret);
+   }
 
    mutex_unlock(&(the_object->operation_synchronizer));
 
@@ -462,6 +515,12 @@ static long dev_ioctl(struct file *filp, unsigned int command, unsigned long par
             the_object->timeout = param;
             printk("%s: Timeout is set to %ld\n", MODNAME, the_object->timeout);
             break;
+         case ENABLE:
+            enabled[minor] = 1;
+            break;
+         case DISABLE:
+            enabled[minor] = 0;
+            break;
          default:
             printk("%s: Unknown operation\n", MODNAME);
             break;
@@ -490,6 +549,11 @@ int init_module(void) {
 		mutex_init(&(objects[i].object_busy));
 #endif
 		mutex_init(&(objects[i].operation_synchronizer));
+      enabled[i] = 1;
+      high_priority_waiting_threads[i] = 0;
+      low_priority_waiting_threads[i] = 0;
+      high_priority_valid_bytes[i] = 0;
+      low_priority_valid_bytes[i] = 0;
       objects[i].priority = HIGH_PRIORITY;
 		objects[i].valid_bytes[0] = 0;
       objects[i].valid_bytes[1] = 0;
