@@ -84,17 +84,15 @@ typedef struct _object_state{
 #ifdef SINGLE_SESSION_OBJECT
 	struct mutex object_busy;
 #endif
+   int session_number;
 	struct mutex operation_synchronizer;
 	int valid_bytes[2];
    int offset[2];
 	char* stream_content[2];    //the I/O node is a buffer in memory
+   enum priority priority[SESSIONS];
+   bool blocking[SESSIONS];
+   unsigned long timeout[SESSIONS];
 } object_state;
-
-typedef struct _session_state{
-   enum priority priority;
-   bool blocking;
-   unsigned long timeout;
-} session_state;
 
 object_state objects[MINORS];
 
@@ -136,29 +134,29 @@ static enum hrtimer_restart my_hrtimer_callback(struct hrtimer *timer){
 }
 
 
-long goto_sleep(session_state *session, int minor){
+long goto_sleep(object_state *the_object, int minor, int priority, int session){
 
 	control_record data;
    control_record* control;
    ktime_t ktime_interval;
    DECLARE_WAIT_QUEUE_HEAD(the_queue);    //here we use a private queue - wakeup is selective via wake_up_process
 
-   if(session->timeout == 0) {
+   if(the_object->timeout == 0) {
       return -1;
    }
 
    control = &data;     //set the pointer to the current stack area
 
    AUDIT
-   printk("%s: thread %d going to usleep for %lu millisecs\n", MODNAME, current->pid, session->timeout);
+   printk("%s: thread %d going to usleep for %lu millisecs\n", MODNAME, current->pid, the_object->timeout[session]);
 
-   ktime_interval = ktime_set(0, session->timeout*1000000);
+   ktime_interval = ktime_set(0, the_object->timeout[session]*1000000);
 
    control->task = current;
    control->pid  = current->pid;
    control->awake = NO;
    control->minor = minor;
-   control->priority = session->priority;
+   control->priority = priority;
 
    hrtimer_init(&(control->hr_timer), CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
@@ -169,7 +167,7 @@ long goto_sleep(session_state *session, int minor){
 
    //Are taken into account both threads waiting to read and threads waiting to write.
    //It is very unlikely that both are present at the same time.
-   if (session->priority == 0) {
+   if (the_object->priority == 0) {
       high_priority_waiting_threads[minor] += 1;
    }
    else {
@@ -197,7 +195,7 @@ void asynchronous_write(unsigned long data){
    int ret;
    int temp_ret;
    int offset;
-   session_state *session = (session_state *)filp->private_data;
+   int session = *(int *)filp->private_data;
 
    AUDIT{
    printk("%s: this print comes from kworker daemon with PID=%d - running on CPU-core %d\n", MODNAME, current->pid, smp_processor_id());
@@ -211,10 +209,10 @@ retry_write2:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
-   if((OBJECT_MAX_SIZE - the_object->valid_bytes[session->priority]) < len) {
+   if((OBJECT_MAX_SIZE - the_object->valid_bytes[the_object->priority[session]]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
-      if (session->blocking && session->timeout != 0) {
-         goto_sleep(session, get_minor(filp));
+      if (the_object->blocking[session] && the_object->timeout[session] != 0) {
+         goto_sleep(the_object, get_minor(filp), the_object->priority[session], session);
          goto retry_write2;
       }
       else {
@@ -222,18 +220,18 @@ retry_write2:
          return;      //no space left on device
       }
    }
-   offset = the_object->valid_bytes[session->priority] + the_object->offset[session->priority];
+   offset = the_object->valid_bytes[the_object->priority[session]] + the_object->offset[the_object->priority[session]];
    if (len + offset >= OBJECT_MAX_SIZE) {
       // buffer is a the end
       // scrivo tanti byte quanti necessari a riempire il buffer
-      temp_ret = copy_from_user(&(the_object->stream_content[session->priority][offset]),
+      temp_ret = copy_from_user(&(the_object->stream_content[the_object->priority[session]][offset]),
          buff, OBJECT_MAX_SIZE - offset);
       if (temp_ret != 0) {
          printk("%s: There was an error in the write\n", MODNAME);
       }
 
       // e rinizio a scrivere dall'inizio
-      ret = copy_from_user(&(the_object->stream_content[session->priority][0]),
+      ret = copy_from_user(&(the_object->stream_content[the_object->priority[session]][0]),
          buff, len - (OBJECT_MAX_SIZE - offset));
       if (ret != 0) {
          printk("%s: There was an error in the write\n", MODNAME);
@@ -241,14 +239,14 @@ retry_write2:
       ret = ret + temp_ret;
    }
    else {
-      ret = copy_from_user(&(the_object->stream_content[session->priority][offset]),
+      ret = copy_from_user(&(the_object->stream_content[the_object->priority[session]][offset]),
             buff, len);
       if (ret != 0) {
          printk("%s: There was an error in the write\n", MODNAME);
       }
    }
 
-   the_object->valid_bytes[session->priority] += (len - ret);
+   the_object->valid_bytes[the_object->priority[session]] += (len - ret);
    low_priority_valid_bytes[get_minor(filp)] += (len - ret);
 
    mutex_unlock(&(the_object->operation_synchronizer));
@@ -299,9 +297,13 @@ int put_work(object_state *the_object, const char *buff, size_t len, struct file
 static int dev_open(struct inode *inode, struct file *file) {
 
    int minor;
-   session_state *session;
+   object_state *the_object;
+   int *session;
+   int i;
 
    minor = get_minor(file);
+   the_object = objects + minor;
+
 
    if(minor >= MINORS){
 	   return -ENODEV;
@@ -318,11 +320,30 @@ static int dev_open(struct inode *inode, struct file *file) {
    }
 #endif
 
-   session = kzalloc(sizeof(session_state), GFP_ATOMIC);     //non blocking memory allocation
-   session->priority = HIGH_PRIORITY;
-   session->blocking = false;
-   session->timeout = 0.0;
-   file->private_data = session;
+   // SEMPRE CHE GLI STO PASSANDO L'INDIRIZZO
+   session = kzalloc(sizeof(long), GFP_ATOMIC);     //non blocking memory allocation
+
+   //need to lock in order to ensure that each session has a different index
+   mutex_lock(&(the_object->operation_synchronizer));
+
+   for (i = 0; i < SESSIONS; i++) {
+      if (the_object->priority[the_object->session_number] == FREE_ENTRY) {
+         *session = the_object->session_number;
+         file->private_data = session;
+         the_object->priority[*(int *)file->private_data] = HIGH_PRIORITY;
+         break;
+      }
+      the_object->session_number = (the_object->session_number + 1) % SESSIONS;
+   }
+   if (i == SESSIONS) {
+      printk("%s: No free sessions available\n", MODNAME);
+      return -EBUSY;
+   }
+
+
+   mutex_unlock(&(the_object->operation_synchronizer));
+
+   printk("%s: session_number = %d, private_data = %p - value = %d", MODNAME, the_object->session_number, file->private_data, *(int *)file->private_data);
 
    printk("%s: device file successfully opened for object with minor %d\n", MODNAME, minor);
    //device opened by a default nop
@@ -349,7 +370,7 @@ static int dev_release(struct inode *inode, struct file *file) {
 #endif
 
    enabled[minor] = 1;
-   //the_object->priority[*(int *)file->private_data] = FREE_ENTRY;
+   the_object->priority[*(int *)file->private_data] = FREE_ENTRY;
    kfree(file->private_data);
 
    printk("%s: device file closed\n",MODNAME);
@@ -365,11 +386,12 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    int temp_ret;
    int offset;
    object_state *the_object;
-   session_state *session = (session_state *)filp->private_data;
+   int session = *(int *)filp->private_data;
 
    the_object = objects + minor;
    printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
+   printk("session = %d\n", session);
 
 retry_write:
    //need to lock in any case
@@ -380,36 +402,36 @@ retry_write:
       return -ENOSPC;      //no space left on device
    } 
 
-   if(*off > the_object->valid_bytes[session->priority]) {      //offset beyond the current stream size
+   if(*off > the_object->valid_bytes[the_object->priority[session]]) {      //offset beyond the current stream size
       mutex_unlock(&(the_object->operation_synchronizer));
       return -ENOSR;    //out of stream resources
    } 
 
-   if((OBJECT_MAX_SIZE - the_object->valid_bytes[session->priority]) < len) {
+   if((OBJECT_MAX_SIZE - the_object->valid_bytes[the_object->priority[session]]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
-      if (session->blocking && session->timeout != 0) {
-         goto_sleep(session, minor);
+      if (the_object->blocking[session] && the_object->timeout[session] != 0) {
+         goto_sleep(the_object, minor, the_object->priority[session], session);
          goto retry_write;
       }
       else {
          return -ENOSPC;      //no space left on device
       }
    }
-   offset = the_object->valid_bytes[session->priority] + the_object->offset[session->priority];
+   offset = the_object->valid_bytes[the_object->priority[session]] + the_object->offset[the_object->priority[session]];
    if (len + offset >= OBJECT_MAX_SIZE) {
       // buffer is a the end
-      if (session->priority == HIGH_PRIORITY) {
+      if (the_object->priority == HIGH_PRIORITY) {
 
          // scrivo tanti byte quanti necessari a riempire il buffer
-         temp_ret = copy_from_user(&(the_object->stream_content[session->priority][offset]),
+         temp_ret = copy_from_user(&(the_object->stream_content[the_object->priority[session]][offset]),
             buff, OBJECT_MAX_SIZE - offset);
 
          // e rinizio a scrivere dall'inizio
-         ret = copy_from_user(&(the_object->stream_content[session->priority][0]),
+         ret = copy_from_user(&(the_object->stream_content[the_object->priority[session]][0]),
             buff, len - (OBJECT_MAX_SIZE - offset));
 
          ret = ret + temp_ret;
-         the_object->valid_bytes[session->priority] += (len - ret);
+         the_object->valid_bytes[the_object->priority[session]] += (len - ret);
          high_priority_valid_bytes[minor] += (len - ret);
       }
       else {
@@ -422,10 +444,10 @@ retry_write:
       }  
    }
    else {
-      if (session->priority == HIGH_PRIORITY) {
-         ret = copy_from_user(&(the_object->stream_content[session->priority][offset]),
+      if (the_object->priority[session] == HIGH_PRIORITY) {
+         ret = copy_from_user(&(the_object->stream_content[the_object->priority[session]][offset]),
             buff, len);
-         the_object->valid_bytes[session->priority] += (len - ret);
+         the_object->valid_bytes[the_object->priority[session]] += (len - ret);
          high_priority_valid_bytes[minor] += (len - ret);
       }
       else {
@@ -451,7 +473,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    int temp_ret;
    object_state *the_object;
 
-   session_state *session = (session_state *)filp->private_data;
+   int session = *(int *)filp->private_data;
 
    the_object = objects + minor;
    printk("%s: somebody called a read on dev with [major,minor] number [%d,%d]\n",
@@ -461,15 +483,15 @@ retry_read:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
-   if(*off > the_object->valid_bytes[session->priority]) {
+   if(*off > the_object->valid_bytes[the_object->priority[session]]) {
  	   mutex_unlock(&(the_object->operation_synchronizer));
 	   return -1;
    } 
 
-   if((the_object->valid_bytes[session->priority]) < len) {
-      if (session->blocking && session->timeout != 0) {
+   if((the_object->valid_bytes[the_object->priority[session]]) < len) {
+      if (the_object->blocking[session] && the_object->timeout[session] != 0) {
          mutex_unlock(&(the_object->operation_synchronizer));
-         goto_sleep(session, minor);
+         goto_sleep(the_object, minor, the_object->priority[session], session);
          goto retry_read;
       }
       else {
@@ -478,25 +500,25 @@ retry_read:
          return -1;      //no enough data on device
       }
    }
-   if (the_object->offset[session->priority] + len >= OBJECT_MAX_SIZE) {
+   if (the_object->offset[the_object->priority[session]] + len >= OBJECT_MAX_SIZE) {
 
-      temp_ret = copy_to_user(buff, &(the_object->stream_content[session->priority][the_object->offset[session->priority]]), 
-         OBJECT_MAX_SIZE - the_object->offset[session->priority]);
+      temp_ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority[session]][the_object->offset[the_object->priority[session]]]), 
+         OBJECT_MAX_SIZE - the_object->offset[the_object->priority[session]]);
 
-      ret = copy_to_user(buff, &(the_object->stream_content[session->priority][0]), 
-         len - (OBJECT_MAX_SIZE - the_object->offset[session->priority]));
+      ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority[session]][0]), 
+         len - (OBJECT_MAX_SIZE - the_object->offset[the_object->priority[session]]));
 
       ret = ret + temp_ret;
 
    } 
    else {
-      ret = copy_to_user(buff, &(the_object->stream_content[session->priority][the_object->offset[session->priority]]), len);
+      ret = copy_to_user(buff, &(the_object->stream_content[the_object->priority[session]][the_object->offset[the_object->priority[session]]]), len);
    }
 
-   the_object->valid_bytes[session->priority] -= (len - ret);
-   the_object->offset[session->priority] = (the_object->offset[session->priority] + (len - ret)) % OBJECT_MAX_SIZE;
+   the_object->valid_bytes[the_object->priority[session]] -= (len - ret);
+   the_object->offset[the_object->priority[session]] = (the_object->offset[the_object->priority[session]] + (len - ret)) % OBJECT_MAX_SIZE;
 
-   if (session->priority == 0) {
+   if (the_object->priority[session] == 0) {
       high_priority_valid_bytes[minor] -= (len - ret);
    }
    else {
@@ -514,28 +536,29 @@ static long dev_ioctl(struct file *filp, unsigned int command, unsigned long par
    int minor = get_minor(filp);
    object_state *the_object;
 
-   session_state *session = (session_state *)filp->private_data;
+   int session = *(int *)filp->private_data;
 
    the_object = objects + minor;
    printk("%s: somebody called an ioctl on dev with [major,minor] number [%d,%d] and command %u \n",
             MODNAME, get_major(filp), get_minor(filp), command);
 
+   //ATT!!! potrebbe dover essere unico per sessione? così cambia uno e cambiano tutti
    switch(command) {
          case HIGH_PRIORITY:
-            session->priority = HIGH_PRIORITY;
+            the_object->priority[session] = HIGH_PRIORITY;
             break;
          case LOW_PRIORITY:
-            session->priority = LOW_PRIORITY;
+            the_object->priority[session] = LOW_PRIORITY;
             break;
          case BLOCKING:
-            session->blocking = true;
+            the_object->blocking[session] = true;
             break;
          case NON_BLOCKING:
-            session->blocking = false;
+            the_object->blocking[session] = false;
             break;
          case TIMEOUT:
-            session->timeout = param;
-            printk("%s: Timeout is set to %ld\n", MODNAME, session->timeout);
+            the_object->timeout[session] = param;
+            printk("%s: Timeout is set to %ld\n", MODNAME, the_object->timeout[session]);
             break;
          case ENABLE:
             enabled[minor] = 1;
@@ -563,7 +586,7 @@ static struct file_operations fops = {
 
 int init_module(void) {
 
-	int i;
+	int i, j;
 
 	//initialize the drive internal state
 	for(i=0; i<MINORS; i++){
@@ -582,6 +605,12 @@ int init_module(void) {
 		objects[i].stream_content[0] = (char*)__get_free_page(GFP_KERNEL);
       objects[i].stream_content[1] = NULL;
 		objects[i].stream_content[1] = (char*)__get_free_page(GFP_KERNEL);
+      objects[i].session_number = 0;
+      for(j=0; j<SESSIONS; j++){
+         objects[i].priority[j] = FREE_ENTRY;
+         objects[i].blocking[j] = false;
+         objects[i].timeout[j] = 0.0;
+      }
 		if ((objects[i].stream_content[0] == NULL) || (objects[i].stream_content[1] == NULL)){
          goto revert_allocation;
       }
