@@ -215,12 +215,14 @@ int main(int argc, char** argv){
 				break;
 			case 5:
 				printf("\nBye bye!\n");
-				ret = close(fd);
-				if (ret == 0) {
-					printf("Device %s is correctly closed\n", device);
-				}
-				else {
-					printf("Error in close\n");
+				if (fd != -1) {
+					ret = close(fd);
+					if (ret == 0) {
+						printf("Device %s is correctly closed\n", device);
+					}
+					else {
+						printf("Error in close\n");
+					}
 				}
 				exit(0);
 			default:

@@ -65,7 +65,8 @@ static int Major;            /* Major number assigned to broadcast device driver
 
 enum priority{
    HIGH_PRIORITY,    //0 if high priority
-   LOW_PRIORITY      //1 if low priority
+   LOW_PRIORITY,     //1 if low priority
+   FREE_ENTRY        //2 if entry is free
 };
 #define BLOCKING 3
 #define NON_BLOCKING 4
@@ -83,6 +84,7 @@ typedef struct _object_state{
 #ifdef SINGLE_SESSION_OBJECT
 	struct mutex object_busy;
 #endif
+   int session_number;
 	struct mutex operation_synchronizer;
 	int valid_bytes[2];
    int offset[2];
@@ -93,8 +95,6 @@ typedef struct _object_state{
 } object_state;
 
 object_state objects[MINORS];
-
-int session_info;
 
 typedef struct _packed_work{
    object_state *the_object;
@@ -195,7 +195,7 @@ void asynchronous_write(unsigned long data){
    int ret;
    int temp_ret;
    int offset;
-   int session = *((int *)filp->private_data);
+   int session = *(int *)filp->private_data;
 
    AUDIT{
    printk("%s: this print comes from kworker daemon with PID=%d - running on CPU-core %d\n", MODNAME, current->pid, smp_processor_id());
@@ -297,7 +297,13 @@ int put_work(object_state *the_object, const char *buff, size_t len, struct file
 static int dev_open(struct inode *inode, struct file *file) {
 
    int minor;
+   object_state *the_object;
+   int *session;
+   int i;
+
    minor = get_minor(file);
+   the_object = objects + minor;
+
 
    if(minor >= MINORS){
 	   return -ENODEV;
@@ -314,8 +320,30 @@ static int dev_open(struct inode *inode, struct file *file) {
    }
 #endif
 
-   session_info = (session_info + 1) % SESSIONS;
-   file->private_data = &session_info;
+   // SEMPRE CHE GLI STO PASSANDO L'INDIRIZZO
+   session = kzalloc(sizeof(long), GFP_ATOMIC);     //non blocking memory allocation
+
+   //need to lock in order to ensure that each session has a different index
+   mutex_lock(&(the_object->operation_synchronizer));
+
+   for (i = 0; i < SESSIONS; i++) {
+      if (the_object->priority[the_object->session_number] == FREE_ENTRY) {
+         *session = the_object->session_number;
+         file->private_data = session;
+         the_object->priority[*(int *)file->private_data] = HIGH_PRIORITY;
+         break;
+      }
+      the_object->session_number = (the_object->session_number + 1) % SESSIONS;
+   }
+   if (i == SESSIONS) {
+      printk("%s: No free sessions available\n", MODNAME);
+      return -EBUSY;
+   }
+
+
+   mutex_unlock(&(the_object->operation_synchronizer));
+
+   printk("%s: session_number = %d, private_data = %p - value = %d", MODNAME, the_object->session_number, file->private_data, *(int *)file->private_data);
 
    printk("%s: device file successfully opened for object with minor %d\n", MODNAME, minor);
    //device opened by a default nop
@@ -332,13 +360,18 @@ open_failure:
 static int dev_release(struct inode *inode, struct file *file) {
 
    int minor;
+   object_state *the_object;
+
    minor = get_minor(file);
+   the_object = objects + minor;
 
 #ifdef SINGLE_SESSION_OBJECT
    mutex_unlock(&(objects[minor].object_busy));
 #endif
 
    enabled[minor] = 1;
+   the_object->priority[*(int *)file->private_data] = FREE_ENTRY;
+   kfree(file->private_data);
 
    printk("%s: device file closed\n",MODNAME);
    //device closed by default nop
@@ -353,11 +386,12 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    int temp_ret;
    int offset;
    object_state *the_object;
-   int session = *((int *)filp->private_data);
+   int session = *(int *)filp->private_data;
 
    the_object = objects + minor;
    printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
+   printk("session = %d\n", session);
 
 retry_write:
    //need to lock in any case
@@ -439,7 +473,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    int temp_ret;
    object_state *the_object;
 
-   int session = *((int *)filp->private_data);
+   int session = *(int *)filp->private_data;
 
    the_object = objects + minor;
    printk("%s: somebody called a read on dev with [major,minor] number [%d,%d]\n",
@@ -502,7 +536,7 @@ static long dev_ioctl(struct file *filp, unsigned int command, unsigned long par
    int minor = get_minor(filp);
    object_state *the_object;
 
-   int session = *((int *)filp->private_data);
+   int session = *(int *)filp->private_data;
 
    the_object = objects + minor;
    printk("%s: somebody called an ioctl on dev with [major,minor] number [%d,%d] and command %u \n",
@@ -571,8 +605,9 @@ int init_module(void) {
 		objects[i].stream_content[0] = (char*)__get_free_page(GFP_KERNEL);
       objects[i].stream_content[1] = NULL;
 		objects[i].stream_content[1] = (char*)__get_free_page(GFP_KERNEL);
+      objects[i].session_number = 0;
       for(j=0; j<SESSIONS; j++){
-         objects[i].priority[j] = HIGH_PRIORITY;
+         objects[i].priority[j] = FREE_ENTRY;
          objects[i].blocking[j] = false;
          objects[i].timeout[j] = 0.0;
       }
@@ -589,7 +624,6 @@ int init_module(void) {
 	   return Major;
 	}
 
-   session_info = 0;
 	printk(KERN_INFO "%s: new device registered, it is assigned major number %d\n", MODNAME, Major);
 
 	return 0;
