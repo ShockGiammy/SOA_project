@@ -88,6 +88,7 @@ typedef struct _object_state{
 	int valid_bytes[2];
    int offset[2];
 	char* stream_content[2];    //the I/O node is a buffer in memory
+   int reserved_bytes;
 } object_state;
 
 typedef struct _session_state{
@@ -211,7 +212,7 @@ retry_write2:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
-   if((OBJECT_MAX_SIZE - the_object->valid_bytes[session->priority]) < len) {
+   /*if((OBJECT_MAX_SIZE - the_object->valid_bytes[session->priority]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
       if (session->blocking && session->timeout != 0) {
          goto_sleep(session, get_minor(filp));
@@ -221,7 +222,7 @@ retry_write2:
          printk("%s: No space left on device\n", MODNAME);
          return;      //no space left on device
       }
-   }
+   }*/
    offset = the_object->valid_bytes[session->priority] + the_object->offset[session->priority];
    if (len + offset >= OBJECT_MAX_SIZE) {
       // buffer is a the end
@@ -250,6 +251,7 @@ retry_write2:
 
    the_object->valid_bytes[session->priority] += (len - ret);
    low_priority_valid_bytes[get_minor(filp)] += (len - ret);
+   the_object->reserved_bytes -= (len - ret);
 
    mutex_unlock(&(the_object->operation_synchronizer));
 
@@ -288,6 +290,7 @@ int put_work(object_state *the_object, const char *buff, size_t len, struct file
    printk("%s: work buffer allocation success - address is %p\n", MODNAME, the_task);
 
    __INIT_WORK(&(the_task->the_work), (void*)asynchronous_write, (unsigned long)(&(the_task->the_work)));
+   mutex_unlock(&(the_object->operation_synchronizer));
    schedule_work(&the_task->the_work);
 
    return 0;
@@ -375,7 +378,7 @@ retry_write:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
-   if(*off >= OBJECT_MAX_SIZE) {    //offset too large
+   if(*off >= (OBJECT_MAX_SIZE - the_object->reserved_bytes)) {    //offset too large
       mutex_unlock(&(the_object->operation_synchronizer));
       return -ENOSPC;      //no space left on device
    } 
@@ -385,7 +388,7 @@ retry_write:
       return -ENOSR;    //out of stream resources
    } 
 
-   if((OBJECT_MAX_SIZE - the_object->valid_bytes[session->priority]) < len) {
+   if(((OBJECT_MAX_SIZE - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
       if (session->blocking && session->timeout != 0) {
          goto_sleep(session, minor);
@@ -414,6 +417,7 @@ retry_write:
       }
       else {
          // potresti pensare di riservare dei byte! Credo serve altro campo nella struct
+         the_object->reserved_bytes += len;
          ret = put_work(the_object, buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
@@ -430,6 +434,7 @@ retry_write:
       }
       else {
          // potresti pensare di riservare dei byte! Credo serve altro campo nella struct
+         the_object->reserved_bytes += len;
          ret = put_work(the_object, buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);

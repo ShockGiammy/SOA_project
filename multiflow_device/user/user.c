@@ -27,7 +27,7 @@ int open_device(char* device) {
 
 	int fd;
 
-	printf("opening device %s\n", device);
+	printf("\nopening device %s\n", device);
 	fd = open(device, O_RDWR);
 	if (fd == -1) {
 		printf("open error on device %s\n", device);
