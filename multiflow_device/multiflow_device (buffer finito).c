@@ -14,8 +14,6 @@
 #include <linux/version.h>	/* For LINUX_VERSION_CODE */
 #include <linux/slab.h>
 
-//#include <structs.h>
-
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Gian Marco Falcone");
@@ -25,20 +23,6 @@ MODULE_AUTHOR("Gian Marco Falcone");
 #define AUDIT if(1)
 
 #define MINORS 128
-
-#define BLOCKING 3
-#define NON_BLOCKING 4
-#define TIMEOUT 5
-#define ENABLE 6
-#define DISABLE 7
-
-#define NO (0)
-#define YES (NO+1)
-
-#define PAGE_SIZE (4096) //the size of one page
-#define MAX_PAGES (10)
-
-#define SESSIONS 64
 
 int enabled[MINORS];
 module_param_array(enabled, int, NULL, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
@@ -84,12 +68,17 @@ enum priority{
    LOW_PRIORITY,     //1 if low priority
    FREE_ENTRY        //2 if entry is free
 };
+#define BLOCKING 3
+#define NON_BLOCKING 4
+#define TIMEOUT 5
+#define ENABLE 6
+#define DISABLE 7
 
-typedef struct _list_stream{
-   char* buffer;
-   struct _list_stream *next;
-   struct _list_stream *prev;
-} list_stream;
+#define NO (0)
+#define YES (NO+1)
+
+#define OBJECT_MAX_SIZE  (4096) //just one page
+#define SESSIONS 64
 
 typedef struct _object_state{
 #ifdef SINGLE_SESSION_OBJECT
@@ -98,7 +87,7 @@ typedef struct _object_state{
 	struct mutex operation_synchronizer;
 	int valid_bytes[2];
    int offset[2];
-	list_stream *stream_content[2];    //the I/O node is a buffer in memory
+	char* stream_content[2];    //the I/O node is a buffer in memory
    int reserved_bytes;
 } object_state;
 
@@ -148,7 +137,7 @@ static enum hrtimer_restart my_hrtimer_callback(struct hrtimer *timer){
 }
 
 
-long goto_sleep(session_state *session, int minor, object_state *the_object, size_t len){
+long goto_sleep(session_state *session, int minor){
 
 	control_record data;
    control_record* control;
@@ -234,45 +223,31 @@ void asynchronous_write(unsigned long data){
          return;      //no space left on device
       }
    }*/
-   offset = the_object->valid_bytes[session->priority] % PAGE_SIZE;
-
-   if (len + offset >= (PAGE_SIZE)) {
+   offset = the_object->valid_bytes[session->priority] + the_object->offset[session->priority];
+   if (len + offset >= OBJECT_MAX_SIZE) {
       // buffer is a the end
-      // occorre allocare un nuovo buffer, e dai limite per evitare attacco Dos
-      if (pages == MAX_PAGES) {
-         printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
-         return -ENOSPC; 
-      }
-
-      content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
-      content->buffer = (char*)__get_free_page(GFP_KERNEL);
-      //controlla che allocazione non fallisca
-   
-      content->prev = current_page;
-      content->next = NULL;
-      current_page->next = content;
-
       // scrivo tanti byte quanti necessari a riempire il buffer
-      temp_ret = copy_from_user(&(current_page->buffer[offset]), buff, PAGE_SIZE - offset);
-      //if vanno probabilmente tolti
+      temp_ret = copy_from_user(&(the_object->stream_content[session->priority][offset]),
+         buff, OBJECT_MAX_SIZE - offset);
       if (temp_ret != 0) {
          printk("%s: There was an error in the write\n", MODNAME);
       }
 
       // e rinizio a scrivere dall'inizio
-      ret = copy_from_user(&(content->buffer[0]), buff, len - (PAGE_SIZE - offset));
+      ret = copy_from_user(&(the_object->stream_content[session->priority][0]),
+         buff, len - (OBJECT_MAX_SIZE - offset));
       if (ret != 0) {
          printk("%s: There was an error in the write\n", MODNAME);
       }
-
       ret = ret + temp_ret;
    }
    else {
-      ret = copy_from_user(&(current_page->buffer[offset]), buff, len);
+      ret = copy_from_user(&(the_object->stream_content[session->priority][offset]),
+            buff, len);
       if (ret != 0) {
          printk("%s: There was an error in the write\n", MODNAME);
       }
-   }  
+   }
 
    the_object->valid_bytes[session->priority] += (len - ret);
    low_priority_valid_bytes[get_minor(filp)] += (len - ret);
@@ -392,11 +367,8 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    int ret;
    int temp_ret;
    int offset;
-   int pages;
    object_state *the_object;
    session_state *session = (session_state *)filp->private_data;
-   list_stream* current_page;
-   list_stream* content;
 
    the_object = objects + minor;
    printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
@@ -406,7 +378,7 @@ retry_write:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
-   if(*off >= ((PAGE_SIZE * MAX_PAGES) - the_object->reserved_bytes)) {    //offset too large
+   if(*off >= (OBJECT_MAX_SIZE - the_object->reserved_bytes)) {    //offset too large
       mutex_unlock(&(the_object->operation_synchronizer));
       return -ENOSPC;      //no space left on device
    } 
@@ -416,47 +388,28 @@ retry_write:
       return -ENOSR;    //out of stream resources
    } 
 
-   if((((PAGE_SIZE * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len) {
+   if(((OBJECT_MAX_SIZE - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
       if (session->blocking && session->timeout != 0) {
-         goto_sleep(session, minor, the_object, len);
+         goto_sleep(session, minor);
          goto retry_write;
       }
       else {
          return -ENOSPC;      //no space left on device
       }
    }
-   offset = the_object->valid_bytes[session->priority] % PAGE_SIZE;
-
-   current_page = the_object->stream_content[session->priority];
-   while (current_page->next != NULL) {
-      pages +=1;
-      current_page = current_page->next;
-   }
-
-   if (len + offset >= (PAGE_SIZE)) {
+   offset = the_object->valid_bytes[session->priority] + the_object->offset[session->priority];
+   if (len + offset >= OBJECT_MAX_SIZE) {
       // buffer is a the end
-      // occorre allocare un nuovo buffer, e dai limite per evitare attacco Dos
-      if (pages == MAX_PAGES) {
-         printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
-         return -ENOSPC; 
-      }
-
-      content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
-      content->buffer = (char*)__get_free_page(GFP_KERNEL);
-      //controlla che allocazione non fallisca
-   
-      content->prev = current_page;
-      content->next = NULL;
-      current_page->next = content;
-
       if (session->priority == HIGH_PRIORITY) {
 
          // scrivo tanti byte quanti necessari a riempire il buffer
-         temp_ret = copy_from_user(&(current_page->buffer[offset]), buff, PAGE_SIZE - offset);
+         temp_ret = copy_from_user(&(the_object->stream_content[session->priority][offset]),
+            buff, OBJECT_MAX_SIZE - offset);
 
          // e rinizio a scrivere dall'inizio
-         ret = copy_from_user(&(content->buffer[0]), buff, len - (PAGE_SIZE - offset));
+         ret = copy_from_user(&(the_object->stream_content[session->priority][0]),
+            buff, len - (OBJECT_MAX_SIZE - offset));
 
          ret = ret + temp_ret;
          the_object->valid_bytes[session->priority] += (len - ret);
@@ -474,8 +427,8 @@ retry_write:
    }
    else {
       if (session->priority == HIGH_PRIORITY) {
-         ret = copy_from_user(&(current_page->buffer[offset]), buff, len);
-
+         ret = copy_from_user(&(the_object->stream_content[session->priority][offset]),
+            buff, len);
          the_object->valid_bytes[session->priority] += (len - ret);
          high_priority_valid_bytes[minor] += (len - ret);
       }
@@ -501,9 +454,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    int minor = get_minor(filp);
    int ret;
    int temp_ret;
-   int pages;
    object_state *the_object;
-   list_stream* current_page;
 
    session_state *session = (session_state *)filp->private_data;
 
@@ -518,14 +469,12 @@ retry_read:
    if(*off > the_object->valid_bytes[session->priority]) {
  	   mutex_unlock(&(the_object->operation_synchronizer));
 	   return -1;
-   }
-
-   current_page = the_object->stream_content[session->priority];
+   } 
 
    if((the_object->valid_bytes[session->priority]) < len) {
       if (session->blocking && session->timeout != 0) {
          mutex_unlock(&(the_object->operation_synchronizer));
-         goto_sleep(session, minor, the_object, len);
+         goto_sleep(session, minor);
          goto retry_read;
       }
       else {
@@ -534,27 +483,23 @@ retry_read:
          return -1;      //no enough data on device
       }
    }
-   if (the_object->offset[session->priority] + len >= (PAGE_SIZE)) {
+   if (the_object->offset[session->priority] + len >= OBJECT_MAX_SIZE) {
 
-      //si può deallocare il buffer precedente
-      temp_ret = copy_to_user(buff, &(current_page->buffer[the_object->offset[session->priority]]), 
-         PAGE_SIZE - the_object->offset[session->priority]);
+      temp_ret = copy_to_user(buff, &(the_object->stream_content[session->priority][the_object->offset[session->priority]]), 
+         OBJECT_MAX_SIZE - the_object->offset[session->priority]);
 
-      ret = copy_to_user(buff, &(current_page->next->buffer[0]), 
-         len - (PAGE_SIZE - the_object->offset[session->priority]));
-
-      current_page->next->prev = NULL;
-      free_page((unsigned long)current_page->buffer);
-      kfree((void*)current_page);
+      ret = copy_to_user(buff, &(the_object->stream_content[session->priority][0]), 
+         len - (OBJECT_MAX_SIZE - the_object->offset[session->priority]));
 
       ret = ret + temp_ret;
+
    } 
    else {
-      ret = copy_to_user(buff, &(current_page->buffer[the_object->offset[session->priority]]), len);
+      ret = copy_to_user(buff, &(the_object->stream_content[session->priority][the_object->offset[session->priority]]), len);
    }
 
    the_object->valid_bytes[session->priority] -= (len - ret);
-   the_object->offset[session->priority] = (the_object->offset[session->priority] + (len - ret)) % PAGE_SIZE;
+   the_object->offset[session->priority] = (the_object->offset[session->priority] + (len - ret)) % OBJECT_MAX_SIZE;
 
    if (session->priority == 0) {
       high_priority_valid_bytes[minor] -= (len - ret);
@@ -625,26 +570,8 @@ int init_module(void) {
 
 	int i;
 
-   list_stream* high_priority_content;
-   list_stream* low_priority_content;
-
 	//initialize the drive internal state
-	for(i = 0; i < MINORS; i++){
-
-      high_priority_content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
-      high_priority_content->buffer = (char*)__get_free_page(GFP_KERNEL);
-      high_priority_content->prev = NULL;
-      high_priority_content->next = NULL;
-
-      low_priority_content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
-      low_priority_content->buffer = (char*)__get_free_page(GFP_KERNEL);
-      low_priority_content->prev = NULL;
-      low_priority_content->next = NULL;
-
-      if ((high_priority_content == NULL) || (low_priority_content == NULL)){
-         goto revert_allocation;
-      }
-
+	for(i=0; i<MINORS; i++){
 #ifdef SINGLE_SESSION_OBJECT
 		mutex_init(&(objects[i].object_busy));
 #endif
@@ -656,8 +583,13 @@ int init_module(void) {
       low_priority_valid_bytes[i] = 0;
 		objects[i].valid_bytes[0] = 0;
       objects[i].valid_bytes[1] = 0;
-		objects[i].stream_content[0] = high_priority_content;
-      objects[i].stream_content[1] = low_priority_content;
+		objects[i].stream_content[0] = NULL;
+		objects[i].stream_content[0] = (char*)__get_free_page(GFP_KERNEL);
+      objects[i].stream_content[1] = NULL;
+		objects[i].stream_content[1] = (char*)__get_free_page(GFP_KERNEL);
+		if ((objects[i].stream_content[0] == NULL) || (objects[i].stream_content[1] == NULL)){
+         goto revert_allocation;
+      }
 	}
 
 	Major = __register_chrdev(0, 0, MINORS, DEVICE_NAME, &fops);
@@ -674,10 +606,8 @@ int init_module(void) {
 
 revert_allocation:
 	for(;i>=0;i--){
-		free_page((unsigned long)objects[i].stream_content[0].buffer);
-      free_page((unsigned long)objects[i].stream_content[1].buffer);
-      kfree((void*)objects[i].stream_content[0]);
-      kfree((void*)objects[i].stream_content[1]);
+		free_page((unsigned long)objects[i].stream_content[0]);
+      free_page((unsigned long)objects[i].stream_content[1]);
 	}
 	return -ENOMEM;
 }
@@ -686,11 +616,9 @@ revert_allocation:
 void cleanup_module(void) {
 
 	int i;
-	for(i = 0 ;i < MINORS; i++){
-		free_page((unsigned long)objects[i].stream_content[0].buffer);
-      free_page((unsigned long)objects[i].stream_content[1].buffer);
-      kfree((void*)objects[i].stream_content[0]);
-      kfree((void*)objects[i].stream_content[1]);
+	for(i=0;i<MINORS;i++){
+		free_page((unsigned long)objects[i].stream_content[0]);
+      free_page((unsigned long)objects[i].stream_content[1]);
 	}
 
 	unregister_chrdev(Major, DEVICE_NAME);
