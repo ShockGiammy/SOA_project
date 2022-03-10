@@ -35,14 +35,13 @@ MODULE_AUTHOR("Gian Marco Falcone");
 #define NO (0)
 #define YES (NO+1)
 
-#define PAGE_SIZE (4096) //the size of one page
+#define PAGE_DIM (4096) //the size of one page
 #define MAX_PAGES (10)
 
 #define SESSIONS 64
 
 int enabled[MINORS];
 module_param_array(enabled, int, NULL, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
-//module_param(enabled, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);    //beware this
 //S_IROTH = lettura per altri
 //S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP = 0660
 
@@ -209,8 +208,10 @@ void asynchronous_write(unsigned long data){
    int ret;
    int temp_ret;
    int offset;
+   int pages;
    session_state *session = (session_state *)filp->private_data;
-
+   list_stream* current_page;
+   
    AUDIT{
    printk("%s: this print comes from kworker daemon with PID=%d - running on CPU-core %d\n", MODNAME, current->pid, smp_processor_id());
    printk("%s: releasing the task buffer at address %p \n",MODNAME, (void*)data);
@@ -219,48 +220,29 @@ void asynchronous_write(unsigned long data){
   printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
-//retry_write2:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
+   offset = (the_object->valid_bytes[session->priority] + the_object->offset[session->priority]) % PAGE_DIM;
 
-   /*if((OBJECT_MAX_SIZE - the_object->valid_bytes[session->priority]) < len) {
-      mutex_unlock(&(the_object->operation_synchronizer));
-      if (session->blocking && session->timeout != 0) {
-         goto_sleep(session, get_minor(filp));
-         goto retry_write2;
-      }
-      else {
-         printk("%s: No space left on device\n", MODNAME);
-         return;      //no space left on device
-      }
-   }*/
-   offset = the_object->valid_bytes[session->priority] % PAGE_SIZE;
+   current_page = the_object->stream_content[session->priority];
+   while (current_page->next != NULL) {
+      pages +=1;
+      current_page = current_page->next;
+   }
 
-   if (len + offset >= (PAGE_SIZE)) {
+   if (len + offset >= (PAGE_DIM)) {
       // buffer is a the end
       // occorre allocare un nuovo buffer, e dai limite per evitare attacco Dos
-      if (pages == MAX_PAGES) {
-         printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
-         return -ENOSPC; 
-      }
-
-      content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
-      content->buffer = (char*)__get_free_page(GFP_KERNEL);
-      //controlla che allocazione non fallisca
-   
-      content->prev = current_page;
-      content->next = NULL;
-      current_page->next = content;
 
       // scrivo tanti byte quanti necessari a riempire il buffer
-      temp_ret = copy_from_user(&(current_page->buffer[offset]), buff, PAGE_SIZE - offset);
+      temp_ret = copy_from_user(&(current_page->prev->buffer[offset]), buff, PAGE_DIM - offset);
       //if vanno probabilmente tolti
       if (temp_ret != 0) {
          printk("%s: There was an error in the write\n", MODNAME);
       }
 
       // e rinizio a scrivere dall'inizio
-      ret = copy_from_user(&(content->buffer[0]), buff, len - (PAGE_SIZE - offset));
+      ret = copy_from_user(&(current_page->buffer[0]), buff, len - (PAGE_DIM - offset));
       if (ret != 0) {
          printk("%s: There was an error in the write\n", MODNAME);
       }
@@ -406,7 +388,7 @@ retry_write:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer));
 
-   if(*off >= ((PAGE_SIZE * MAX_PAGES) - the_object->reserved_bytes)) {    //offset too large
+   if(*off >= ((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes)) {    //offset too large
       mutex_unlock(&(the_object->operation_synchronizer));
       return -ENOSPC;      //no space left on device
    } 
@@ -416,7 +398,7 @@ retry_write:
       return -ENOSR;    //out of stream resources
    } 
 
-   if((((PAGE_SIZE * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len) {
+   if((((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer));
       if (session->blocking && session->timeout != 0) {
          goto_sleep(session, minor, the_object, len);
@@ -426,7 +408,7 @@ retry_write:
          return -ENOSPC;      //no space left on device
       }
    }
-   offset = the_object->valid_bytes[session->priority] % PAGE_SIZE;
+   offset = (the_object->valid_bytes[session->priority] + the_object->offset[session->priority]) % PAGE_DIM;
 
    current_page = the_object->stream_content[session->priority];
    while (current_page->next != NULL) {
@@ -434,7 +416,7 @@ retry_write:
       current_page = current_page->next;
    }
 
-   if (len + offset >= (PAGE_SIZE)) {
+   if (len + offset >= (PAGE_DIM)) {
       // buffer is a the end
       // occorre allocare un nuovo buffer, e dai limite per evitare attacco Dos
       if (pages == MAX_PAGES) {
@@ -453,17 +435,17 @@ retry_write:
       if (session->priority == HIGH_PRIORITY) {
 
          // scrivo tanti byte quanti necessari a riempire il buffer
-         temp_ret = copy_from_user(&(current_page->buffer[offset]), buff, PAGE_SIZE - offset);
+         temp_ret = copy_from_user(&(current_page->buffer[offset]), buff, PAGE_DIM - offset);
 
          // e rinizio a scrivere dall'inizio
-         ret = copy_from_user(&(content->buffer[0]), buff, len - (PAGE_SIZE - offset));
+         ret = copy_from_user(&(content->buffer[0]), buff, len - (PAGE_DIM - offset));
 
          ret = ret + temp_ret;
          the_object->valid_bytes[session->priority] += (len - ret);
          high_priority_valid_bytes[minor] += (len - ret);
       }
       else {
-         // potresti pensare di riservare dei byte! Credo serve altro campo nella struct
+         // riservo dei byte! altro campo nella struct
          the_object->reserved_bytes += len;
          ret = put_work(the_object, buff, len, filp);
          if (ret != 0) {
@@ -480,7 +462,7 @@ retry_write:
          high_priority_valid_bytes[minor] += (len - ret);
       }
       else {
-         // potresti pensare di riservare dei byte! Credo serve altro campo nella struct
+         // riservo dei byte! altro campo nella struct
          the_object->reserved_bytes += len;
          ret = put_work(the_object, buff, len, filp);
          if (ret != 0) {
@@ -501,7 +483,6 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    int minor = get_minor(filp);
    int ret;
    int temp_ret;
-   int pages;
    object_state *the_object;
    list_stream* current_page;
 
@@ -534,15 +515,16 @@ retry_read:
          return -1;      //no enough data on device
       }
    }
-   if (the_object->offset[session->priority] + len >= (PAGE_SIZE)) {
+   if (the_object->offset[session->priority] + len >= (PAGE_DIM)) {
 
       //si può deallocare il buffer precedente
       temp_ret = copy_to_user(buff, &(current_page->buffer[the_object->offset[session->priority]]), 
-         PAGE_SIZE - the_object->offset[session->priority]);
+         PAGE_DIM - the_object->offset[session->priority]);
 
       ret = copy_to_user(buff, &(current_page->next->buffer[0]), 
-         len - (PAGE_SIZE - the_object->offset[session->priority]));
+         len - (PAGE_DIM - the_object->offset[session->priority]));
 
+      the_object->stream_content[session->priority] = current_page->next;
       current_page->next->prev = NULL;
       free_page((unsigned long)current_page->buffer);
       kfree((void*)current_page);
@@ -554,7 +536,7 @@ retry_read:
    }
 
    the_object->valid_bytes[session->priority] -= (len - ret);
-   the_object->offset[session->priority] = (the_object->offset[session->priority] + (len - ret)) % PAGE_SIZE;
+   the_object->offset[session->priority] = (the_object->offset[session->priority] + (len - ret)) % PAGE_DIM;
 
    if (session->priority == 0) {
       high_priority_valid_bytes[minor] -= (len - ret);
@@ -674,8 +656,8 @@ int init_module(void) {
 
 revert_allocation:
 	for(;i>=0;i--){
-		free_page((unsigned long)objects[i].stream_content[0].buffer);
-      free_page((unsigned long)objects[i].stream_content[1].buffer);
+		free_page((unsigned long)objects[i].stream_content[0]->buffer);
+      free_page((unsigned long)objects[i].stream_content[1]->buffer);
       kfree((void*)objects[i].stream_content[0]);
       kfree((void*)objects[i].stream_content[1]);
 	}
@@ -687,8 +669,8 @@ void cleanup_module(void) {
 
 	int i;
 	for(i = 0 ;i < MINORS; i++){
-		free_page((unsigned long)objects[i].stream_content[0].buffer);
-      free_page((unsigned long)objects[i].stream_content[1].buffer);
+		free_page((unsigned long)objects[i].stream_content[0]->buffer);
+      free_page((unsigned long)objects[i].stream_content[1]->buffer);
       kfree((void*)objects[i].stream_content[0]);
       kfree((void*)objects[i].stream_content[1]);
 	}
