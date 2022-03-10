@@ -94,7 +94,7 @@ typedef struct _object_state{
 #ifdef SINGLE_SESSION_OBJECT
 	struct mutex object_busy;
 #endif
-	struct mutex operation_synchronizer;
+	struct mutex operation_synchronizer[2];
 	int valid_bytes[2];
    int offset[2];
 	list_stream *stream_content[2];    //the I/O node is a buffer in memory
@@ -209,7 +209,6 @@ void asynchronous_write(unsigned long data){
    int temp_ret;
    int offset;
    int pages;
-   session_state *session = (session_state *)filp->private_data;
    list_stream* current_page;
    
    AUDIT{
@@ -220,11 +219,11 @@ void asynchronous_write(unsigned long data){
   printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
-   //need to lock in any case
-   mutex_lock(&(the_object->operation_synchronizer));
-   offset = (the_object->valid_bytes[session->priority] + the_object->offset[session->priority]) % PAGE_DIM;
+   //need to lock in any case, siamo sicuri sul flusso low_priority
+   mutex_lock(&(the_object->operation_synchronizer[1]));
+   offset = (the_object->valid_bytes[1] + the_object->offset[1]) % PAGE_DIM;
 
-   current_page = the_object->stream_content[session->priority];
+   current_page = the_object->stream_content[1];
    while (current_page->next != NULL) {
       pages +=1;
       current_page = current_page->next;
@@ -256,11 +255,11 @@ void asynchronous_write(unsigned long data){
       }
    }  
 
-   the_object->valid_bytes[session->priority] += (len - ret);
+   the_object->valid_bytes[1] += (len - ret);
    low_priority_valid_bytes[get_minor(filp)] += (len - ret);
    the_object->reserved_bytes -= (len - ret);
 
-   mutex_unlock(&(the_object->operation_synchronizer));
+   mutex_unlock(&(the_object->operation_synchronizer[1]));
 
    kfree(container_of((void*)data,packed_work,the_work));
    module_put(THIS_MODULE);
@@ -297,7 +296,7 @@ int put_work(object_state *the_object, const char *buff, size_t len, struct file
    printk("%s: work buffer allocation success - address is %p\n", MODNAME, the_task);
 
    __INIT_WORK(&(the_task->the_work), (void*)asynchronous_write, (unsigned long)(&(the_task->the_work)));
-   mutex_unlock(&(the_object->operation_synchronizer));
+   mutex_unlock(&(the_object->operation_synchronizer[1]));
    schedule_work(&the_task->the_work);
 
    return 0;
@@ -386,20 +385,21 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
 
 retry_write:
    //need to lock in any case
-   mutex_lock(&(the_object->operation_synchronizer));
+   mutex_lock(&(the_object->operation_synchronizer[session->priority]));
 
    if(*off >= ((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes)) {    //offset too large
-      mutex_unlock(&(the_object->operation_synchronizer));
+      mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       return -ENOSPC;      //no space left on device
    } 
 
    if(*off > the_object->valid_bytes[session->priority]) {      //offset beyond the current stream size
-      mutex_unlock(&(the_object->operation_synchronizer));
+      mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       return -ENOSR;    //out of stream resources
    } 
 
+   // forse reserved bytes si può spostare sotto, conta solo per low_priority
    if((((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len) {
-      mutex_unlock(&(the_object->operation_synchronizer));
+      mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       if (session->blocking && session->timeout != 0) {
          goto_sleep(session, minor, the_object, len);
          goto retry_write;
@@ -421,6 +421,7 @@ retry_write:
       // occorre allocare un nuovo buffer, e dai limite per evitare attacco Dos
       if (pages == MAX_PAGES) {
          printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
+         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          return -ENOSPC; 
       }
 
@@ -450,6 +451,7 @@ retry_write:
          ret = put_work(the_object, buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
+            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
             return -1;
          }
       }  
@@ -467,12 +469,13 @@ retry_write:
          ret = put_work(the_object, buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
+            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
             return -1;
          }
       }  
    }
 
-   mutex_unlock(&(the_object->operation_synchronizer));
+   mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
 
    return len - ret;
 }
@@ -494,10 +497,10 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
 
 retry_read:
    //need to lock in any case
-   mutex_lock(&(the_object->operation_synchronizer));
+   mutex_lock(&(the_object->operation_synchronizer[session->priority]));
 
    if(*off > the_object->valid_bytes[session->priority]) {
- 	   mutex_unlock(&(the_object->operation_synchronizer));
+ 	   mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
 	   return -1;
    }
 
@@ -505,13 +508,13 @@ retry_read:
 
    if((the_object->valid_bytes[session->priority]) < len) {
       if (session->blocking && session->timeout != 0) {
-         mutex_unlock(&(the_object->operation_synchronizer));
+         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          goto_sleep(session, minor, the_object, len);
          goto retry_read;
       }
       else {
          printk("%s: Not enough data to read\n", MODNAME);
-         mutex_unlock(&(the_object->operation_synchronizer));
+         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          return -1;      //no enough data on device
       }
    }
@@ -545,7 +548,7 @@ retry_read:
       low_priority_valid_bytes[minor] -= (len - ret);
    }
 
-   mutex_unlock(&(the_object->operation_synchronizer));
+   mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
 
    return len - ret;
 }
@@ -630,7 +633,8 @@ int init_module(void) {
 #ifdef SINGLE_SESSION_OBJECT
 		mutex_init(&(objects[i].object_busy));
 #endif
-		mutex_init(&(objects[i].operation_synchronizer));
+		mutex_init(&(objects[i].operation_synchronizer[0]));
+      mutex_init(&(objects[i].operation_synchronizer[1]));
       enabled[i] = 1;
       high_priority_waiting_threads[i] = 0;
       low_priority_waiting_threads[i] = 0;
