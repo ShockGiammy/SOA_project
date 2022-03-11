@@ -163,6 +163,15 @@ long goto_sleep(session_state *session, int minor, object_state *the_object, siz
    AUDIT
    printk("%s: thread %d going to usleep for %lu millisecs\n", MODNAME, current->pid, session->timeout);
 
+   //Are taken into account both threads waiting to read and threads waiting to write.
+   //It is very unlikely that both are present at the same time.
+   if (session->priority == 0) {
+      high_priority_waiting_threads[minor] += 1;
+   }
+   else {
+      low_priority_waiting_threads[minor] += 1;
+   }
+
    ktime_interval = ktime_set(0, session->timeout*1000000);
 
    control->task = current;
@@ -177,15 +186,6 @@ long goto_sleep(session_state *session, int minor, object_state *the_object, siz
    hrtimer_start(&(control->hr_timer), ktime_interval, HRTIMER_MODE_REL);
       
    wait_event_interruptible(the_queue, control->awake == YES);
-
-   //Are taken into account both threads waiting to read and threads waiting to write.
-   //It is very unlikely that both are present at the same time.
-   if (session->priority == 0) {
-      high_priority_waiting_threads[minor] += 1;
-   }
-   else {
-      low_priority_waiting_threads[minor] += 1;
-   }
 
    hrtimer_cancel(&(control->hr_timer));
    
@@ -427,7 +427,13 @@ retry_write:
 
       content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
       content->buffer = (char*)__get_free_page(GFP_KERNEL);
-      //controlla che allocazione non fallisca
+      //controllo che allocazione non fallisca
+      if ((content == NULL) || (content->buffer == NULL)) {
+         free_page((unsigned long)content->buffer);
+         kfree((void*)content);
+         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+         return -ENOMEM; 
+      }
    
       content->prev = current_page;
       content->next = NULL;
@@ -626,7 +632,8 @@ int init_module(void) {
       low_priority_content->prev = NULL;
       low_priority_content->next = NULL;
 
-      if ((high_priority_content == NULL) || (low_priority_content == NULL)){
+      if ((high_priority_content == NULL) || (low_priority_content == NULL) 
+            || (high_priority_content->buffer == NULL) || (low_priority_content->buffer == NULL)){
          goto revert_allocation;
       }
 

@@ -1,4 +1,4 @@
-user:
+user_CLI:
 	gcc user.c -lpthread -o user
 
 creator:
