@@ -142,13 +142,21 @@ int main(int argc, char** argv){
 
 	while(1) {
 		memset(cmd, 0, sizeof(char)*(strlen(cmd)+1));
-		printf("\nChoose an operation to perform on the device driver:\n");
-		//printf("0) Create a new device driver\n");
-		printf("1) Open an existing device driver\n");
-		printf("2) Write data from opened device\n");
-		printf("3) Read data from opened device\n");
-		printf("4) Call the ioctl() service\n");
-		printf("5) Close the device\n");
+		if (fd == -1) {
+			printf("\nChoose an operation:\n");
+			//printf("0) Create a new device driver\n");
+			printf("1) Open an existing device driver\n");
+			printf("5) Exit from the application\n");
+		}
+		else {
+			printf("\nChoose an operation to perform on the device driver:\n");
+			//printf("0) Create a new device driver\n");
+			printf("1) Close the actual device and open an other one\n");
+			printf("2) Write data to opened device\n");
+			printf("3) Read data from opened device\n");
+			printf("4) Call the ioctl() service\n");
+			printf("5) Close the device and exit from the application\n");
+		}
 		fgets(cmd, 3, stdin);
 		decision = strtol(cmd, NULL, 10);
 		switch(decision) {

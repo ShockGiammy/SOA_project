@@ -132,7 +132,7 @@ typedef struct _control_record{
 } control_record;
 
 
-static enum hrtimer_restart my_hrtimer_callback(struct hrtimer *timer){
+/*static enum hrtimer_restart my_hrtimer_callback(struct hrtimer *timer){
 
    control_record *control;
    struct task_struct *the_task;
@@ -149,7 +149,7 @@ static enum hrtimer_restart my_hrtimer_callback(struct hrtimer *timer){
    }
 
    return HRTIMER_NORESTART;
-}
+}*/
 
 
 long goto_sleep(session_state *session, int type, object_state *the_object, size_t len){
@@ -192,14 +192,14 @@ long goto_sleep(session_state *session, int type, object_state *the_object, size
       
    if (type == READ) {
       //timeout is in jiffies = 10 millisecondi
-      wait_event_timeout(the_object->wait_queue, len >= the_object->valid_bytes[priority], session->timeout*0.1);
+      wait_event_timeout(the_object->wait_queue, len >= the_object->valid_bytes[priority], session->timeout*100);
    } else if ((type == WRITE) && (priority == LOW_PRIORITY)) {
       wait_event_timeout(the_object->wait_queue, len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority]),
-         session->timeout*0.1);
+         session->timeout*100);
    }
    else if ((type == WRITE) && (priority == HIGH_PRIORITY)) {
       wait_event_timeout(the_object->wait_queue, len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]),
-         session->timeout*0.1);
+         session->timeout*100);
    }
 
    //hrtimer_cancel(&(control->hr_timer));
@@ -207,7 +207,7 @@ long goto_sleep(session_state *session, int type, object_state *the_object, size
    AUDIT
    printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
 
-   if ((type == READ && len < the_object->valid_bytes) || (type == WRITE && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]))) {
+   if ((type == READ && len < the_object->valid_bytes[priority]) || (type == WRITE && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]))) {
       return -1;
    }
    return 0;
@@ -275,8 +275,9 @@ void asynchronous_write(unsigned long data){
    the_object->reserved_bytes -= (len - ret);
 
    mutex_unlock(&(the_object->operation_synchronizer[1]));
-   wake_up(&the_object->wait_queue);
-
+   //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
+   wake_up_all(&the_object->wait_queue);
+   
    kfree(container_of((void*)data,packed_work,the_work));
    module_put(THIS_MODULE);
    return;
@@ -399,7 +400,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
-retry_write:
+//retry_write:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer[session->priority]));
 
@@ -418,7 +419,7 @@ retry_write:
       mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       if (session->blocking && session->timeout != 0) {
          goto_sleep(session, WRITE, the_object, len);
-         goto retry_write;
+         //goto retry_write;
       }
       else {
          return -ENOSPC;      //no space left on device
@@ -498,7 +499,8 @@ retry_write:
    }
 
    mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-   wake_up(&the_object->wait_queue);
+   //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
+   wake_up_all(&the_object->wait_queue);
 
    return len - ret;
 }
@@ -518,7 +520,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    printk("%s: somebody called a read on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
-retry_read:
+//retry_read:
    //need to lock in any case
    mutex_lock(&(the_object->operation_synchronizer[session->priority]));
 
@@ -533,7 +535,7 @@ retry_read:
       if (session->blocking && session->timeout != 0) {
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          goto_sleep(session, READ, the_object, len);
-         goto retry_read;
+         //goto retry_read;
       }
       else {
          printk("%s: Not enough data to read\n", MODNAME);
@@ -572,7 +574,8 @@ retry_read:
    }
 
    mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-   wake_up(&the_object->wait_queue);
+   //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
+   wake_up_all(&the_object->wait_queue);
 
    return len - ret;
 }
@@ -639,8 +642,9 @@ int init_module(void) {
 
 	//initialize the drive internal state
 	for(i = 0; i < MINORS; i++){
-
-      DECLARE_WAIT_QUEUE_HEAD(the_queue);    //we use a single queue for each minor
+  
+      //Initialize wait queue
+      init_waitqueue_head(&objects[i].wait_queue); //a single queue for each minor
 
       high_priority_content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
       high_priority_content->buffer = (char*)__get_free_page(GFP_KERNEL);
@@ -660,7 +664,6 @@ int init_module(void) {
 #ifdef SINGLE_SESSION_OBJECT
 		mutex_init(&(objects[i].object_busy));
 #endif
-      objects[i].wait_queue = the_queue;
 
       objects[i].minor = i;
 		mutex_init(&(objects[i].operation_synchronizer[0]));
