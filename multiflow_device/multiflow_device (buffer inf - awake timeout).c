@@ -40,9 +40,6 @@ MODULE_AUTHOR("Gian Marco Falcone");
 
 #define SESSIONS 64
 
-#define READ 0
-#define WRITE 1
-
 int enabled[MINORS];
 module_param_array(enabled, int, NULL, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 //S_IROTH = lettura per altri
@@ -97,13 +94,11 @@ typedef struct _object_state{
 #ifdef SINGLE_SESSION_OBJECT
 	struct mutex object_busy;
 #endif
-   int minor;
 	struct mutex operation_synchronizer[2];
 	int valid_bytes[2];
    int offset[2];
 	list_stream *stream_content[2];    //the I/O node is a buffer in memory
    int reserved_bytes;
-   wait_queue_head_t wait_queue;
 } object_state;
 
 typedef struct _session_state{
@@ -152,12 +147,12 @@ static enum hrtimer_restart my_hrtimer_callback(struct hrtimer *timer){
 }
 
 
-long goto_sleep(session_state *session, int type, object_state *the_object, size_t len){
+long goto_sleep(session_state *session, int minor, object_state *the_object, size_t len){
 
 	control_record data;
    control_record* control;
-   //ktime_t ktime_interval;
-   int priority = session->priority;
+   ktime_t ktime_interval;
+   DECLARE_WAIT_QUEUE_HEAD(the_queue);    //here we use a private queue - wakeup is selective via wake_up_process
 
    if(session->timeout == 0) {
       return -1;
@@ -170,44 +165,34 @@ long goto_sleep(session_state *session, int type, object_state *the_object, size
 
    //Are taken into account both threads waiting to read and threads waiting to write.
    //It is very unlikely that both are present at the same time.
-   if (priority == 0) {
-      high_priority_waiting_threads[the_object->minor] += 1;
+   if (session->priority == 0) {
+      high_priority_waiting_threads[minor] += 1;
    }
    else {
-      low_priority_waiting_threads[the_object->minor] += 1;
+      low_priority_waiting_threads[minor] += 1;
    }
 
-   //ktime_interval = ktime_set(0, session->timeout*1000000);
+   ktime_interval = ktime_set(0, session->timeout*1000000);
 
    control->task = current;
    control->pid  = current->pid;
    control->awake = NO;
-   control->minor = the_object->minor;
-   control->priority = priority;
+   control->minor = minor;
+   control->priority = session->priority;
 
-   /*hrtimer_init(&(control->hr_timer), CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+   hrtimer_init(&(control->hr_timer), CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
    control->hr_timer.function = &my_hrtimer_callback;
-   hrtimer_start(&(control->hr_timer), ktime_interval, HRTIMER_MODE_REL);*/
+   hrtimer_start(&(control->hr_timer), ktime_interval, HRTIMER_MODE_REL);
       
-   if (type == READ) {
-      //timeout is in jiffies = 10 millisecondi
-      wait_event_timeout(the_object->wait_queue, len >= the_object->valid_bytes[priority], session->timeout*0.1);
-   } else if ((type == WRITE) && (priority == LOW_PRIORITY)) {
-      wait_event_timeout(the_object->wait_queue, len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority]),
-         session->timeout*0.1);
-   }
-   else if ((type == WRITE) && (priority == HIGH_PRIORITY)) {
-      wait_event_timeout(the_object->wait_queue, len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]),
-         session->timeout*0.1);
-   }
+   wait_event_interruptible(the_queue, control->awake == YES);
 
-   //hrtimer_cancel(&(control->hr_timer));
+   hrtimer_cancel(&(control->hr_timer));
    
    AUDIT
    printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
 
-   if ((type == READ && len < the_object->valid_bytes) || (type == WRITE && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]))) {
+   if(unlikely(control->awake != YES)) {
       return -1;
    }
    return 0;
@@ -275,7 +260,6 @@ void asynchronous_write(unsigned long data){
    the_object->reserved_bytes -= (len - ret);
 
    mutex_unlock(&(the_object->operation_synchronizer[1]));
-   wake_up(&the_object->wait_queue);
 
    kfree(container_of((void*)data,packed_work,the_work));
    module_put(THIS_MODULE);
@@ -417,7 +401,7 @@ retry_write:
    if((((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len) {
       mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       if (session->blocking && session->timeout != 0) {
-         goto_sleep(session, WRITE, the_object, len);
+         goto_sleep(session, minor, the_object, len);
          goto retry_write;
       }
       else {
@@ -498,7 +482,6 @@ retry_write:
    }
 
    mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-   wake_up(&the_object->wait_queue);
 
    return len - ret;
 }
@@ -532,7 +515,7 @@ retry_read:
    if((the_object->valid_bytes[session->priority]) < len) {
       if (session->blocking && session->timeout != 0) {
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-         goto_sleep(session, READ, the_object, len);
+         goto_sleep(session, minor, the_object, len);
          goto retry_read;
       }
       else {
@@ -572,7 +555,6 @@ retry_read:
    }
 
    mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-   wake_up(&the_object->wait_queue);
 
    return len - ret;
 }
@@ -640,8 +622,6 @@ int init_module(void) {
 	//initialize the drive internal state
 	for(i = 0; i < MINORS; i++){
 
-      DECLARE_WAIT_QUEUE_HEAD(the_queue);    //we use a single queue for each minor
-
       high_priority_content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
       high_priority_content->buffer = (char*)__get_free_page(GFP_KERNEL);
       high_priority_content->prev = NULL;
@@ -660,9 +640,6 @@ int init_module(void) {
 #ifdef SINGLE_SESSION_OBJECT
 		mutex_init(&(objects[i].object_busy));
 #endif
-      objects[i].wait_queue = the_queue;
-
-      objects[i].minor = i;
 		mutex_init(&(objects[i].operation_synchronizer[0]));
       mutex_init(&(objects[i].operation_synchronizer[1]));
       enabled[i] = 1;
