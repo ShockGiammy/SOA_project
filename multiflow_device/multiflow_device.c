@@ -141,6 +141,7 @@ typedef struct _control_record{
    control->awake = YES;
    the_task = control->task;
    wake_up_process(the_task);
+   //TODO vanno decrementati!
    if (control->priority == 0) {
       high_priority_waiting_threads[control->minor] -= 1;
    }
@@ -189,7 +190,9 @@ long goto_sleep(session_state *session, int type, object_state *the_object, size
 
    control->hr_timer.function = &my_hrtimer_callback;
    hrtimer_start(&(control->hr_timer), ktime_interval, HRTIMER_MODE_REL);*/
-      
+
+
+   printf("len = %d - valid_bytes = %d", len, the_object->valid_bytes[priority])   
    if (type == READ) {
       //timeout is in jiffies = 10 millisecondi
       wait_event_timeout(the_object->wait_queue, len >= the_object->valid_bytes[priority], session->timeout*100);
@@ -277,7 +280,7 @@ void asynchronous_write(unsigned long data){
    mutex_unlock(&(the_object->operation_synchronizer[1]));
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
    wake_up_all(&the_object->wait_queue);
-   
+
    kfree(container_of((void*)data,packed_work,the_work));
    module_put(THIS_MODULE);
    return;
@@ -535,6 +538,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
       if (session->blocking && session->timeout != 0) {
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          goto_sleep(session, READ, the_object, len);
+         //però esce subito da qua
          //goto retry_read;
       }
       else {
