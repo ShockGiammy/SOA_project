@@ -188,17 +188,14 @@ int my_lock(object_state *the_object, session_state *session) {
    int ret = mutex_trylock(&(the_object->operation_synchronizer[session->priority]));
    if (ret != 1) {
       if (session->blocking && session->timeout != 0) {
-         //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          ret = goto_sleep_mutex(the_object, session);
          if (ret == -1) {
             printk("%s: The timeout elapsed and there are not enough data to read\n", MODNAME);
-            //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
             return -1;      //no enough data on device
          }
       }
       else {
          printk("%s: Device already in use\n", MODNAME);
-         //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          return -EBUSY;      //no enough data on device
       }
    }
@@ -211,7 +208,7 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
 	control_record data;
    control_record* control;
    int priority = session->priority;
-   int ret;
+   //int ret;
 
    if(session->timeout == 0) {
       return -1;
@@ -240,17 +237,18 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
 
    if (type == READ) {
       //timeout is in jiffies = 10 millisecondi
-      wait_event_timeout(the_object->wait_queue, len <= the_object->valid_bytes[priority], session->timeout*HZ/1000);
+      wait_event_timeout(the_object->wait_queue, len <= the_object->valid_bytes[priority] 
+            && mutex_trylock(&(the_object->operation_synchronizer[session->priority])), session->timeout*HZ/1000);
    } else if ((type == WRITE) && (priority == LOW_PRIORITY)) {
-      wait_event_timeout(the_object->wait_queue, len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority]),
-         session->timeout*HZ/1000);
+      wait_event_timeout(the_object->wait_queue, (len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority])) 
+            && mutex_trylock(&(the_object->operation_synchronizer[session->priority])), session->timeout*HZ/1000);
    }
    else if ((type == WRITE) && (priority == HIGH_PRIORITY)) {
-      wait_event_timeout(the_object->wait_queue, len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]),
-         session->timeout*HZ/1000);
+      wait_event_timeout(the_object->wait_queue, (len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority])) 
+            && mutex_trylock(&(the_object->operation_synchronizer[session->priority])), session->timeout*HZ/1000);
    }
 
-   ret = my_lock(the_object, session);
+   //ret = my_lock(the_object, session);
 
    AUDIT
    printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
@@ -262,12 +260,14 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
       low_priority_waiting_threads[control->minor] -= 1;
    }
 
-   if (ret != 0) {
+   /*if (ret != 0) {
       return -1;
-      //potresti pensare ad un goto a prima della condizione, ma timeput evenutalmente infinito
-   }
-
-   if ((type == READ && len > the_object->valid_bytes[priority]) || (type == WRITE && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]))) {
+      //potresti pensare ad un goto a prima della condizione, ma timeout evenutalmente infinito
+   }*/
+   //mancano i byte reserved, controlla la priorità
+   if ((type == READ && len > the_object->valid_bytes[priority]) 
+         || (type == WRITE && priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
+         || (type == WRITE && priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
       return -1;
    }
    return 0;
