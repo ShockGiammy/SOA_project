@@ -195,14 +195,14 @@ long goto_sleep(session_state *session, int type, object_state *the_object, size
    printf("len = %ld - valid_bytes = %ld", len, the_object->valid_bytes[priority])   
    if (type == READ) {
       //timeout is in jiffies = 10 millisecondi
-      wait_event_timeout(the_object->wait_queue, len >= the_object->valid_bytes[priority], session->timeout*100);
+      wait_event_timeout(the_object->wait_queue, len >= the_object->valid_bytes[priority], session->timeout/10);
    } else if ((type == WRITE) && (priority == LOW_PRIORITY)) {
       wait_event_timeout(the_object->wait_queue, len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority]),
-         session->timeout*100);
+         session->timeout/10);
    }
    else if ((type == WRITE) && (priority == HIGH_PRIORITY)) {
       wait_event_timeout(the_object->wait_queue, len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]),
-         session->timeout*100);
+         session->timeout/10);
    }
 
    //hrtimer_cancel(&(control->hr_timer));
