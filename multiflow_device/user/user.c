@@ -149,7 +149,7 @@ int main(int argc, char** argv){
 			printf("5) Exit from the application\n");
 		}
 		else {
-			printf("\nChoose an operation to perform on the device driver:\n");
+			printf("\n\nChoose an operation to perform on the device driver:\n");
 			//printf("0) Create a new device driver\n");
 			printf("1) Close the actual device and open an other one\n");
 			printf("2) Write data to opened device\n");

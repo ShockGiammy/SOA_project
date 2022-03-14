@@ -125,40 +125,93 @@ typedef struct _packed_work{
 typedef struct _control_record{
    struct task_struct *task;       
    int pid;
-   int awake;
    int minor;
    int priority;
-   struct hrtimer hr_timer;
 } control_record;
 
 
-/*static enum hrtimer_restart my_hrtimer_callback(struct hrtimer *timer){
+int goto_sleep_mutex(object_state *the_object, session_state *session){
 
-   control_record *control;
-   struct task_struct *the_task;
+	control_record data;
+   control_record* control;
+   int priority = session->priority;
+   int ret;
 
-   control = (control_record*)container_of(timer, control_record, hr_timer);
-   control->awake = YES;
-   the_task = control->task;
-   wake_up_process(the_task);
-   //TODO vanno decrementati!
-   if (control->priority == 0) {
+   if(session->timeout == 0) {
+      return -1;
+   }
+
+   control = &data;     //set the pointer to the current stack area
+
+   AUDIT
+   printk("%s: thread %d going to usleep for %lu millisecs\n", MODNAME, current->pid, session->timeout);
+
+   //Thread waiting for data or mutex
+   if (priority == 0) {
+      high_priority_waiting_threads[the_object->minor] += 1;
+   }
+   else {
+      low_priority_waiting_threads[the_object->minor] += 1;
+   }
+
+
+   control->task = current;
+   control->pid  = current->pid;
+   control->minor = the_object->minor;
+   control->priority = priority;
+
+
+   //timeout is in jiffies = 10 millisecondi
+   ret = wait_event_timeout(the_object->wait_queue, 
+      mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
+
+   AUDIT
+   printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
+
+   if (priority == 0) {
       high_priority_waiting_threads[control->minor] -= 1;
    }
    else {
       low_priority_waiting_threads[control->minor] -= 1;
    }
 
-   return HRTIMER_NORESTART;
-}*/
+   if (ret == 0) {
+      return -1;
+      //potresti pensare ad un goto a prima della condizione, ma timeput evenutalmente infinito
+   }
+   return 0;
+}
 
 
-long goto_sleep(session_state *session, int type, object_state *the_object, size_t len){
+int my_lock(object_state *the_object, session_state *session) {
+
+   int ret = mutex_trylock(&(the_object->operation_synchronizer[session->priority]));
+   if (ret != 1) {
+      if (session->blocking && session->timeout != 0) {
+         //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+         ret = goto_sleep_mutex(the_object, session);
+         if (ret == -1) {
+            printk("%s: The timeout elapsed and there are not enough data to read\n", MODNAME);
+            //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+            return -1;      //no enough data on device
+         }
+      }
+      else {
+         printk("%s: Device already in use\n", MODNAME);
+         //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+         return -EBUSY;      //no enough data on device
+      }
+   }
+   return 0;
+}
+
+
+int goto_sleep(session_state *session, int type, object_state *the_object, size_t len){
 
 	control_record data;
    control_record* control;
-   //ktime_t ktime_interval;
    int priority = session->priority;
+   int ret;
 
    if(session->timeout == 0) {
       return -1;
@@ -178,39 +231,43 @@ long goto_sleep(session_state *session, int type, object_state *the_object, size
       low_priority_waiting_threads[the_object->minor] += 1;
    }
 
-   //ktime_interval = ktime_set(0, session->timeout*1000000);
 
    control->task = current;
    control->pid  = current->pid;
-   control->awake = NO;
    control->minor = the_object->minor;
    control->priority = priority;
 
-   /*hrtimer_init(&(control->hr_timer), CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
-   control->hr_timer.function = &my_hrtimer_callback;
-   hrtimer_start(&(control->hr_timer), ktime_interval, HRTIMER_MODE_REL);*/
-
-
-   printf("len = %ld - valid_bytes = %ld", len, the_object->valid_bytes[priority])   
    if (type == READ) {
       //timeout is in jiffies = 10 millisecondi
-      wait_event_timeout(the_object->wait_queue, len >= the_object->valid_bytes[priority], session->timeout/10);
+      wait_event_timeout(the_object->wait_queue, len <= the_object->valid_bytes[priority], session->timeout*HZ/1000);
    } else if ((type == WRITE) && (priority == LOW_PRIORITY)) {
       wait_event_timeout(the_object->wait_queue, len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority]),
-         session->timeout/10);
+         session->timeout*HZ/1000);
    }
    else if ((type == WRITE) && (priority == HIGH_PRIORITY)) {
       wait_event_timeout(the_object->wait_queue, len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]),
-         session->timeout/10);
+         session->timeout*HZ/1000);
    }
 
-   //hrtimer_cancel(&(control->hr_timer));
-   
+   ret = my_lock(the_object, session);
+
    AUDIT
    printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
 
-   if ((type == READ && len < the_object->valid_bytes[priority]) || (type == WRITE && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]))) {
+   if (priority == 0) {
+      high_priority_waiting_threads[control->minor] -= 1;
+   }
+   else {
+      low_priority_waiting_threads[control->minor] -= 1;
+   }
+
+   if (ret != 0) {
+      return -1;
+      //potresti pensare ad un goto a prima della condizione, ma timeput evenutalmente infinito
+   }
+
+   if ((type == READ && len > the_object->valid_bytes[priority]) || (type == WRITE && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]))) {
       return -1;
    }
    return 0;
@@ -238,7 +295,9 @@ void asynchronous_write(unsigned long data){
             MODNAME, get_major(filp), get_minor(filp));
 
    //need to lock in any case, siamo sicuri sul flusso low_priority
+   //work queue permettono lavoro bloccante
    mutex_lock(&(the_object->operation_synchronizer[1]));
+
    offset = (the_object->valid_bytes[1] + the_object->offset[1]) % PAGE_DIM;
 
    current_page = the_object->stream_content[1];
@@ -403,9 +462,11 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
-//retry_write:
    //need to lock in any case
-   mutex_lock(&(the_object->operation_synchronizer[session->priority]));
+   ret = my_lock(the_object, session);
+   if (ret != 0) {
+      return -EBUSY;
+   }
 
    if(*off >= ((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes)) {    //offset too large
       mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
@@ -417,12 +478,17 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       return -ENOSR;    //out of stream resources
    } 
 
-   // forse reserved bytes si può spostare sotto, conta solo per low_priority
-   if((((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len) {
+   //reserved bytes conta solo per low_priority
+   if ((session->priority == HIGH_PRIORITY && ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[session->priority]) < len) ||
+      (session->priority == LOW_PRIORITY && (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len)) {
       mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       if (session->blocking && session->timeout != 0) {
          goto_sleep(session, WRITE, the_object, len);
-         //goto retry_write;
+         if (ret == -1) {
+            printk("%s: The timeout elapsed and there are not enough available sapce\n", MODNAME);
+            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+            return -1;      //no enough data on device
+         }
       }
       else {
          return -ENOSPC;      //no space left on device
@@ -523,9 +589,11 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    printk("%s: somebody called a read on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
-//retry_read:
    //need to lock in any case
-   mutex_lock(&(the_object->operation_synchronizer[session->priority]));
+   ret = my_lock(the_object, session);
+   if (ret != 0) {
+      return -EBUSY;
+   }
 
    if(*off > the_object->valid_bytes[session->priority]) {
  	   mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
@@ -537,9 +605,12 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    if((the_object->valid_bytes[session->priority]) < len) {
       if (session->blocking && session->timeout != 0) {
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-         goto_sleep(session, READ, the_object, len);
-         //però esce subito da qua
-         //goto retry_read;
+         ret = goto_sleep(session, READ, the_object, len);
+         if (ret == -1) {
+            printk("%s: The timeout elapsed and there are not enough data to read\n", MODNAME);
+            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+            return -1;      //no enough data on device
+         }
       }
       else {
          printk("%s: Not enough data to read\n", MODNAME);
@@ -580,7 +651,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
    wake_up_all(&the_object->wait_queue);
-
+   
    return len - ret;
 }
 
