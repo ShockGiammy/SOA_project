@@ -192,7 +192,7 @@ long goto_sleep(session_state *session, int type, object_state *the_object, size
    hrtimer_start(&(control->hr_timer), ktime_interval, HRTIMER_MODE_REL);*/
 
 
-   printf("len = %d - valid_bytes = %d", len, the_object->valid_bytes[priority])   
+   printf("len = %ld - valid_bytes = %ld", len, the_object->valid_bytes[priority])   
    if (type == READ) {
       //timeout is in jiffies = 10 millisecondi
       wait_event_timeout(the_object->wait_queue, len >= the_object->valid_bytes[priority], session->timeout*100);
