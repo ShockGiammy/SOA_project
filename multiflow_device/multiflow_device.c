@@ -40,8 +40,8 @@ MODULE_AUTHOR("Gian Marco Falcone");
 
 #define SESSIONS 64
 
-#define READ 0
-#define WRITE 1
+#define SLEEP_READ 0
+#define SLEEP_WRITE 1
 
 int enabled[MINORS];
 module_param_array(enabled, int, NULL, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
@@ -235,17 +235,17 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
    control->priority = priority;
 
 
-   if (type == READ) {
+   if (type == SLEEP_READ) {
       //timeout is in jiffies = 10 millisecondi
       wait_event_timeout(the_object->wait_queue, len <= the_object->valid_bytes[priority] 
-            && mutex_trylock(&(the_object->operation_synchronizer[session->priority])), session->timeout*HZ/1000);
-   } else if ((type == WRITE) && (priority == LOW_PRIORITY)) {
+            && mutex_trylock(&(the_object->operation_synchronizer[session->priority]) == 1), session->timeout*HZ/1000);
+   } else if ((type == SLEEP_WRITE) && (priority == LOW_PRIORITY)) {
       wait_event_timeout(the_object->wait_queue, (len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority])) 
-            && mutex_trylock(&(the_object->operation_synchronizer[session->priority])), session->timeout*HZ/1000);
+            && mutex_trylock(&(the_object->operation_synchronizer[session->priority]) == 1), session->timeout*HZ/1000);
    }
-   else if ((type == WRITE) && (priority == HIGH_PRIORITY)) {
+   else if ((type == SLEEP_WRITE) && (priority == HIGH_PRIORITY)) {
       wait_event_timeout(the_object->wait_queue, (len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority])) 
-            && mutex_trylock(&(the_object->operation_synchronizer[session->priority])), session->timeout*HZ/1000);
+            && mutex_trylock(&(the_object->operation_synchronizer[session->priority]) == 1), session->timeout*HZ/1000);
    }
 
    //ret = my_lock(the_object, session);
@@ -268,6 +268,7 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
    if ((type == READ && len > the_object->valid_bytes[priority]) 
          || (type == WRITE && priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
          || (type == WRITE && priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
+      mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       return -1;
    }
    return 0;
@@ -452,12 +453,12 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    int ret;
    int temp_ret;
    int offset;
-   int pages;
    object_state *the_object;
    session_state *session = (session_state *)filp->private_data;
    list_stream* current_page;
    list_stream* content;
 
+   int pages = 0;
    the_object = objects + minor;
    printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
@@ -483,7 +484,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       (session->priority == LOW_PRIORITY && (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len)) {
       mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       if (session->blocking && session->timeout != 0) {
-         goto_sleep(session, WRITE, the_object, len);
+         goto_sleep(session, SLEEP_WRITE, the_object, len);
          if (ret == -1) {
             printk("%s: The timeout elapsed and there are not enough available sapce\n", MODNAME);
             mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
@@ -605,7 +606,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    if((the_object->valid_bytes[session->priority]) < len) {
       if (session->blocking && session->timeout != 0) {
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-         ret = goto_sleep(session, READ, the_object, len);
+         ret = goto_sleep(session, SLEEP_READ, the_object, len);
          if (ret == -1) {
             printk("%s: The timeout elapsed and there are not enough data to read\n", MODNAME);
             mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
