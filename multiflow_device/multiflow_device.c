@@ -319,7 +319,7 @@ void asynchronous_write(unsigned long data){
       }
 
       // e rinizio a scrivere dall'inizio
-      ret = copy_from_user(&(current_page->buffer[0]), &buff[PAGE_DIM - offset + 1], len - (PAGE_DIM - offset));
+      ret = copy_from_user(&(current_page->buffer[0]), &buff[PAGE_DIM - offset], len - (PAGE_DIM - offset));
       if (ret != 0) {
          printk("%s: There was an error in the write\n", MODNAME);
       }
@@ -530,11 +530,9 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
 
          // scrivo tanti byte quanti necessari a riempire il buffer
          temp_ret = copy_from_user(&(current_page->buffer[offset]), buff, PAGE_DIM - offset);
-         printk("%s: %s\n", MODNAME, &(current_page->buffer[offset]));
 
          // e rinizio a scrivere dall'inizio
          ret = copy_from_user(&(content->buffer[0]), &buff[PAGE_DIM - offset], len - (PAGE_DIM - offset));
-         printk("%s: %s\n", MODNAME, &(content->buffer[0]));
 
          ret = ret + temp_ret;
          the_object->valid_bytes[session->priority] += (len - ret);
@@ -627,11 +625,9 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
       //si può deallocare il buffer precedente
       temp_ret = copy_to_user(buff, &(current_page->buffer[the_object->offset[session->priority]]), 
          PAGE_DIM - the_object->offset[session->priority]);
-      printk("%s: %s\n", MODNAME, buff);
 
       ret = copy_to_user(&buff[PAGE_DIM - the_object->offset[session->priority]], &(current_page->next->buffer[0]), 
          len - (PAGE_DIM - the_object->offset[session->priority]));
-      printk("%s: %s\n", MODNAME, &buff[PAGE_DIM - the_object->offset[session->priority]]);
 
       the_object->stream_content[session->priority] = current_page->next;
       current_page->next->prev = NULL;
