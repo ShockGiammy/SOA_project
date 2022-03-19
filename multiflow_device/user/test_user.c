@@ -34,6 +34,7 @@ void * the_thread(void* path){
 	//ioctl(fd, 0);	//high_priority
 	ret = write(fd, DATA, SIZE);
 	//ret = read(fd, buff, SIZE);
+	//printf("%s", buff);
 	printf("%d\n", ret);
 	return NULL;
 
