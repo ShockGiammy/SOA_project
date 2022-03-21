@@ -315,12 +315,14 @@ void asynchronous_write(unsigned long data){
       temp_ret = copy_from_user(&(current_page->prev->buffer[offset]), buff, PAGE_DIM - offset);
       //if vanno probabilmente tolti
       if (temp_ret != 0) {
+         mutex_unlock(&(the_object->operation_synchronizer[1]));
          printk("%s: There was an error in the write\n", MODNAME);
       }
 
       // e rinizio a scrivere dall'inizio
       ret = copy_from_user(&(current_page->buffer[0]), &buff[PAGE_DIM - offset], len - (PAGE_DIM - offset));
       if (ret != 0) {
+         mutex_unlock(&(the_object->operation_synchronizer[1]));
          printk("%s: There was an error in the write\n", MODNAME);
       }
 
@@ -329,6 +331,7 @@ void asynchronous_write(unsigned long data){
    else {
       ret = copy_from_user(&(current_page->buffer[offset]), buff, len);
       if (ret != 0) {
+         mutex_unlock(&(the_object->operation_synchronizer[1]));
          printk("%s: There was an error in the write\n", MODNAME);
       }
    }  
