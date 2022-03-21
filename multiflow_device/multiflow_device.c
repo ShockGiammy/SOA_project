@@ -13,6 +13,7 @@
 #include <linux/tty.h>		/* For the tty declarations */
 #include <linux/version.h>	/* For LINUX_VERSION_CODE */
 #include <linux/slab.h>
+#include <linux/string.h>
 
 //#include <structs.h>
 
@@ -281,8 +282,6 @@ void asynchronous_write(unsigned long data){
    char *buff = container_of((void*)data,packed_work,the_work)->buffer;
    size_t len = container_of((void*)data,packed_work,the_work)->len;
    struct file *filp = container_of((void*)data,packed_work,the_work)->filp;
-   int ret;
-   int temp_ret;
    int offset;
    int pages;
    list_stream* current_page;
@@ -312,39 +311,39 @@ void asynchronous_write(unsigned long data){
       // occorre allocare un nuovo buffer, e dai limite per evitare attacco Dos
 
       // scrivo tanti byte quanti necessari a riempire il buffer
-      temp_ret = copy_from_user(&(current_page->prev->buffer[offset]), buff, PAGE_DIM - offset);
-      //if vanno probabilmente tolti
+      memcpy(&(current_page->prev->buffer[offset]), buff, PAGE_DIM - offset);
+      /*if vanno probabilmente tolti
       if (temp_ret != 0) {
          mutex_unlock(&(the_object->operation_synchronizer[1]));
          printk("%s: There was an error in the write\n", MODNAME);
-      }
+      }*/
 
       // e rinizio a scrivere dall'inizio
-      ret = copy_from_user(&(current_page->buffer[0]), &buff[PAGE_DIM - offset], len - (PAGE_DIM - offset));
-      if (ret != 0) {
+      memcpy(&(current_page->buffer[0]), &buff[PAGE_DIM - offset], len - (PAGE_DIM - offset));
+      /*if (ret != 0) {
          mutex_unlock(&(the_object->operation_synchronizer[1]));
          printk("%s: There was an error in the write\n", MODNAME);
       }
 
-      ret = ret + temp_ret;
+      ret = ret + temp_ret;*/
    }
    else {
-      ret = copy_from_user(&(current_page->buffer[offset]), buff, len);
-      if (ret != 0) {
+      memcpy(&(current_page->buffer[offset]), buff, len);
+      /*if (ret != 0) {
          mutex_unlock(&(the_object->operation_synchronizer[1]));
          printk("%s: There was an error in the write\n", MODNAME);
-      }
+      }*/
    }  
 
-   the_object->valid_bytes[1] += (len - ret);
-   low_priority_valid_bytes[get_minor(filp)] += (len - ret);
-   the_object->reserved_bytes -= (len - ret);
+   the_object->valid_bytes[1] += len;
+   low_priority_valid_bytes[get_minor(filp)] += len;
+   the_object->reserved_bytes -= len;
 
    mutex_unlock(&(the_object->operation_synchronizer[1]));
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
    wake_up_all(&the_object->wait_queue);
 
-   kfree(container_of((void*)data,packed_work,the_work));
+   kfree(container_of((void*)data, packed_work, the_work));
    module_put(THIS_MODULE);
    return;
 }
@@ -353,6 +352,8 @@ void asynchronous_write(unsigned long data){
 int put_work(object_state *the_object, const char *buff, size_t len, struct file *filp){
    
    packed_work *the_task;
+   char *buffer;
+   int ret;
 
    if(!try_module_get(THIS_MODULE)) {
       return -ENODEV;
@@ -370,7 +371,15 @@ int put_work(object_state *the_object, const char *buff, size_t len, struct file
       return -1;
    }
 
-   the_task->buffer = (char*)buff;
+   buffer = (char*)__get_free_page(GFP_KERNEL);
+   if (buffer == NULL){
+      printk("%s: kernel buffer allocation failure\n",MODNAME);
+      free_page((unsigned long)buffer);
+   }
+
+   ret = copy_from_user(&(buffer), buff, len);
+
+   the_task->buffer = buffer;
    the_task->the_object = the_object;
    the_task->len = len;
    the_task->filp = filp;
@@ -382,7 +391,7 @@ int put_work(object_state *the_object, const char *buff, size_t len, struct file
    mutex_unlock(&(the_object->operation_synchronizer[1]));
    schedule_work(&the_task->the_work);
 
-   return 0;
+   return len - ret;
 }
 
 
