@@ -116,8 +116,9 @@ typedef struct _session_state{
 object_state objects[MINORS];
 
 typedef struct _packed_work{
+   void* struct_addr;
    object_state *the_object;
-   char *buffer;
+   const char *buffer;
    size_t len;
    struct file *filp;
    struct work_struct the_work;
@@ -279,7 +280,7 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
 void asynchronous_write(unsigned long data){
 
    object_state *the_object = container_of((void*)data,packed_work,the_work)->the_object;
-   char *buff = container_of((void*)data,packed_work,the_work)->buffer;
+   const char *buff = container_of((void*)data,packed_work,the_work)->buffer;
    size_t len = container_of((void*)data,packed_work,the_work)->len;
    struct file *filp = container_of((void*)data,packed_work,the_work)->filp;
    int offset;
@@ -343,6 +344,7 @@ void asynchronous_write(unsigned long data){
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
    wake_up_all(&the_object->wait_queue);
 
+   kfree(buff);
    kfree(container_of((void*)data, packed_work, the_work));
    module_put(THIS_MODULE);
    return;
@@ -371,14 +373,16 @@ int put_work(object_state *the_object, const char *buff, size_t len, struct file
       return -1;
    }
 
-   buffer = (char*)__get_free_page(GFP_KERNEL);
+   buffer = kzalloc(len, GFP_ATOMIC);     //non blocking memory allocation
    if (buffer == NULL){
       printk("%s: kernel buffer allocation failure\n",MODNAME);
       free_page((unsigned long)buffer);
    }
 
-   ret = copy_from_user(&(buffer), buff, len);
+   ret = copy_from_user(buffer, buff, len);
+   printk("dati: %s, len: %ld, ret: %d\n", buffer, len, ret);
 
+   the_task->struct_addr = the_task;
    the_task->buffer = buffer;
    the_task->the_object = the_object;
    the_task->len = len;
@@ -391,7 +395,7 @@ int put_work(object_state *the_object, const char *buff, size_t len, struct file
    mutex_unlock(&(the_object->operation_synchronizer[1]));
    schedule_work(&the_task->the_work);
 
-   return len - ret;
+   return ret;
 }
 
 
@@ -556,15 +560,14 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          ret = put_work(the_object, buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
-            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-            return -1;
+            //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+            //return -1;
          }
       }  
    }
    else {
       if (session->priority == HIGH_PRIORITY) {
          ret = copy_from_user(&(current_page->buffer[offset]), buff, len);
-         printk("%s: %s\n", MODNAME, &(current_page->buffer[offset]));
 
          the_object->valid_bytes[session->priority] += (len - ret);
          high_priority_valid_bytes[minor] += (len - ret);
@@ -575,8 +578,8 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          ret = put_work(the_object, buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
-            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-            return -1;
+            //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+            //return -1;
          }
       }  
    }

@@ -32,9 +32,9 @@ void * the_thread(void* path){
 	ioctl(fd, 5, 30000);	//timeout
 	//ioctl(fd, 4);	//non-blocking
 	//ioctl(fd, 0);	//high_priority
-	ret = write(fd, DATA, SIZE);
-	//ret = read(fd, buff, SIZE);
-	//printf("%s", buff);
+	//ret = write(fd, DATA, SIZE);
+	ret = read(fd, buff, SIZE);
+	printf("%s", buff);
 	printf("%d\n", ret);
 	return NULL;
 
