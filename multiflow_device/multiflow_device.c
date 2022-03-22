@@ -313,27 +313,12 @@ void asynchronous_write(unsigned long data){
 
       // scrivo tanti byte quanti necessari a riempire il buffer
       memcpy(&(current_page->prev->buffer[offset]), buff, PAGE_DIM - offset);
-      /*if vanno probabilmente tolti
-      if (temp_ret != 0) {
-         mutex_unlock(&(the_object->operation_synchronizer[1]));
-         printk("%s: There was an error in the write\n", MODNAME);
-      }*/
 
       // e rinizio a scrivere dall'inizio
       memcpy(&(current_page->buffer[0]), &buff[PAGE_DIM - offset], len - (PAGE_DIM - offset));
-      /*if (ret != 0) {
-         mutex_unlock(&(the_object->operation_synchronizer[1]));
-         printk("%s: There was an error in the write\n", MODNAME);
-      }
-
-      ret = ret + temp_ret;*/
    }
    else {
       memcpy(&(current_page->buffer[offset]), buff, len);
-      /*if (ret != 0) {
-         mutex_unlock(&(the_object->operation_synchronizer[1]));
-         printk("%s: There was an error in the write\n", MODNAME);
-      }*/
    }  
 
    the_object->valid_bytes[1] += len;
@@ -344,14 +329,14 @@ void asynchronous_write(unsigned long data){
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
    wake_up_all(&the_object->wait_queue);
 
-   kfree(buff);
+   kfree((void*)buff);
    kfree(container_of((void*)data, packed_work, the_work));
    module_put(THIS_MODULE);
    return;
 }
 
 
-int put_work(object_state *the_object, const char *buff, size_t len, struct file *filp){
+int put_work(object_state *the_object, char *buff, size_t len, struct file *filp){
    
    packed_work *the_task;
    char *buffer;
@@ -373,17 +358,8 @@ int put_work(object_state *the_object, const char *buff, size_t len, struct file
       return -1;
    }
 
-   buffer = kzalloc(len, GFP_ATOMIC);     //non blocking memory allocation
-   if (buffer == NULL){
-      printk("%s: kernel buffer allocation failure\n",MODNAME);
-      free_page((unsigned long)buffer);
-   }
-
-   ret = copy_from_user(buffer, buff, len);
-   printk("dati: %s, len: %ld, ret: %d\n", buffer, len, ret);
-
    the_task->struct_addr = the_task;
-   the_task->buffer = buffer;
+   the_task->buffer = buff;
    the_task->the_object = the_object;
    the_task->len = len;
    the_task->filp = filp;
@@ -392,10 +368,9 @@ int put_work(object_state *the_object, const char *buff, size_t len, struct file
    printk("%s: work buffer allocation success - address is %p\n", MODNAME, the_task);
 
    __INIT_WORK(&(the_task->the_work), (void*)asynchronous_write, (unsigned long)(&(the_task->the_work)));
-   mutex_unlock(&(the_object->operation_synchronizer[1]));
    schedule_work(&the_task->the_work);
 
-   return ret;
+   return 0;
 }
 
 
@@ -467,17 +442,21 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
 
    int minor = get_minor(filp);
    int ret;
-   int temp_ret;
+   int ret_copy;
    int offset;
    object_state *the_object;
    session_state *session = (session_state *)filp->private_data;
    list_stream* current_page;
    list_stream* content;
+   char* temp_buff;
 
    int pages = 0;
    the_object = objects + minor;
    printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
+
+   temp_buff = (char*)kmalloc(len, GFP_ATOMIC);     //non blocking memory allocation
+   ret_copy = copy_from_user(temp_buff, buff, len);
 
    //need to lock in any case
    ret = my_lock(the_object, session);
@@ -485,7 +464,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       return -EBUSY;
    }
 
-   if(*off >= ((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes)) {    //offset too large
+   /*if(*off >= ((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes)) {    //offset too large
       mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       return -ENOSPC;      //no space left on device
    } 
@@ -493,14 +472,14 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    if(*off > the_object->valid_bytes[session->priority]) {      //offset beyond the current stream size
       mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       return -ENOSR;    //out of stream resources
-   } 
+   }*/
 
    //reserved bytes conta solo per low_priority
    if ((session->priority == HIGH_PRIORITY && ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[session->priority]) < len) ||
       (session->priority == LOW_PRIORITY && (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len)) {
       mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       if (session->blocking && session->timeout != 0) {
-         goto_sleep(session, SLEEP_WRITE, the_object, len);
+         ret = goto_sleep(session, SLEEP_WRITE, the_object, len);
          if (ret == -1) {
             printk("%s: The timeout elapsed and there are not enough available sapce\n", MODNAME);
             mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
@@ -545,19 +524,21 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       if (session->priority == HIGH_PRIORITY) {
 
          // scrivo tanti byte quanti necessari a riempire il buffer
-         temp_ret = copy_from_user(&(current_page->buffer[offset]), buff, PAGE_DIM - offset);
+         memcpy(&(current_page->buffer[offset]), temp_buff, PAGE_DIM - offset);
 
          // e rinizio a scrivere dall'inizio
-         ret = copy_from_user(&(content->buffer[0]), &buff[PAGE_DIM - offset], len - (PAGE_DIM - offset));
+         memcpy(&(content->buffer[0]), &temp_buff[PAGE_DIM - offset], len - (PAGE_DIM - offset));
 
-         ret = ret + temp_ret;
-         the_object->valid_bytes[session->priority] += (len - ret);
-         high_priority_valid_bytes[minor] += (len - ret);
+         the_object->valid_bytes[session->priority] += (len - ret_copy);
+         high_priority_valid_bytes[minor] += (len - ret_copy);
+
+         kfree((void*)temp_buff);
       }
       else {
          // riservo dei byte! altro campo nella struct
          the_object->reserved_bytes += len;
-         ret = put_work(the_object, buff, len, filp);
+         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+         ret = put_work(the_object, temp_buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
             //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
@@ -567,15 +548,18 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    }
    else {
       if (session->priority == HIGH_PRIORITY) {
-         ret = copy_from_user(&(current_page->buffer[offset]), buff, len);
+         memcpy(&(current_page->buffer[offset]), temp_buff, len);
 
-         the_object->valid_bytes[session->priority] += (len - ret);
-         high_priority_valid_bytes[minor] += (len - ret);
+         the_object->valid_bytes[session->priority] += (len - ret_copy);
+         high_priority_valid_bytes[minor] += (len - ret_copy);
+
+         kfree((void*)temp_buff);
       }
       else {
          // riservo dei byte! altro campo nella struct
          the_object->reserved_bytes += len;
-         ret = put_work(the_object, buff, len, filp);
+         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+         ret = put_work(the_object, temp_buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
             //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
@@ -588,7 +572,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
    wake_up_all(&the_object->wait_queue);
 
-   return len - ret;
+   return len - ret_copy;
 }
 
 
@@ -596,9 +580,9 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
 
    int minor = get_minor(filp);
    int ret;
-   int temp_ret;
    object_state *the_object;
    list_stream* current_page;
+   char *temp_buff;
 
    session_state *session = (session_state *)filp->private_data;
 
@@ -606,16 +590,18 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    printk("%s: somebody called a read on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
+   temp_buff = (char*)kmalloc(len, GFP_ATOMIC);     //non blocking memory allocation
+
    //need to lock in any case
    ret = my_lock(the_object, session);
    if (ret != 0) {
       return -EBUSY;
    }
 
-   if(*off > the_object->valid_bytes[session->priority]) {
+   /*if(*off > the_object->valid_bytes[session->priority]) {
  	   mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
 	   return -1;
-   }
+   }*/
 
    current_page = the_object->stream_content[session->priority];
 
@@ -637,22 +623,18 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    }
    if (the_object->offset[session->priority] + len >= (PAGE_DIM)) {
 
+      memcpy(temp_buff, &(current_page->buffer[the_object->offset[session->priority]]), PAGE_DIM - the_object->offset[session->priority])
+      memcpy(&temp_buff[PAGE_DIM - the_object->offset[session->priority]], &(current_page->next->buffer[0]), 
+         len - (PAGE_DIM - the_object->offset[session->priority]))
       //si può deallocare il buffer precedente
-      temp_ret = copy_to_user(buff, &(current_page->buffer[the_object->offset[session->priority]]), 
-         PAGE_DIM - the_object->offset[session->priority]);
-
-      ret = copy_to_user(&buff[PAGE_DIM - the_object->offset[session->priority]], &(current_page->next->buffer[0]), 
-         len - (PAGE_DIM - the_object->offset[session->priority]));
 
       the_object->stream_content[session->priority] = current_page->next;
       current_page->next->prev = NULL;
       free_page((unsigned long)current_page->buffer);
       kfree((void*)current_page);
-
-      ret = ret + temp_ret;
    } 
    else {
-      ret = copy_to_user(buff, &(current_page->buffer[the_object->offset[session->priority]]), len);
+      memcpy(temp_buff, &(current_page->buffer[the_object->offset[session->priority]]), len);
    }
 
    the_object->valid_bytes[session->priority] -= (len - ret);
@@ -666,6 +648,10 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    }
 
    mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+
+   ret = copy_to_user(&buff, &temp_buff, len);
+   kree((void*)temp_buff);
+
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
    wake_up_all(&the_object->wait_queue);
    
