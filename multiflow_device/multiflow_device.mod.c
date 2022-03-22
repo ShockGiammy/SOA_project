@@ -36,11 +36,11 @@ __used __section(__versions) = {
 	{ 0x362ef408, "_copy_from_user" },
 	{ 0xc5b6f236, "queue_work_on" },
 	{ 0x2d3385d3, "system_wq" },
-	{ 0xeb233a45, "__kmalloc" },
 	{ 0x1937241e, "try_module_get" },
-	{ 0x4302d0eb, "free_pages" },
 	{ 0xb44ad4b3, "_copy_to_user" },
 	{ 0x88db9f48, "__check_object_size" },
+	{ 0x4302d0eb, "free_pages" },
+	{ 0xeb233a45, "__kmalloc" },
 	{ 0x92540fbf, "finish_wait" },
 	{ 0x8ddd8aad, "schedule_timeout" },
 	{ 0x8c26d495, "prepare_to_wait_event" },
@@ -64,4 +64,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "");
 
 
-MODULE_INFO(srcversion, "A2B9C79BFC41F05439719E0");
+MODULE_INFO(srcversion, "6873687EEDC778487E21716");

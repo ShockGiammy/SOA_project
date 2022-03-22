@@ -339,8 +339,6 @@ void asynchronous_write(unsigned long data){
 int put_work(object_state *the_object, char *buff, size_t len, struct file *filp){
    
    packed_work *the_task;
-   char *buffer;
-   int ret;
 
    if(!try_module_get(THIS_MODULE)) {
       return -ENODEV;
@@ -622,9 +620,9 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    }
    if (the_object->offset[session->priority] + len >= (PAGE_DIM)) {
 
-      memcpy(temp_buff, &(current_page->buffer[the_object->offset[session->priority]]), PAGE_DIM - the_object->offset[session->priority])
+      memcpy(temp_buff, &(current_page->buffer[the_object->offset[session->priority]]), PAGE_DIM - the_object->offset[session->priority]);
       memcpy(&temp_buff[PAGE_DIM - the_object->offset[session->priority]], &(current_page->next->buffer[0]), 
-         len - (PAGE_DIM - the_object->offset[session->priority]))
+         len - (PAGE_DIM - the_object->offset[session->priority]));
       //si può deallocare il buffer precedente
 
       the_object->stream_content[session->priority] = current_page->next;
@@ -648,8 +646,8 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
 
    mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
 
-   ret = copy_to_user(&buff, &temp_buff, len);
-   kree((void*)temp_buff);
+   ret = copy_to_user(buff, temp_buff, len);
+   kfree((void*)temp_buff);
 
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
    wake_up_all(&the_object->wait_queue);
