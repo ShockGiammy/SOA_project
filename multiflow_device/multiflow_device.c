@@ -292,7 +292,7 @@ void asynchronous_write(unsigned long data){
    printk("%s: releasing the task buffer at address %p \n",MODNAME, (void*)data);
    }
 
-  printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
+   printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
    //need to lock in any case, siamo sicuri sul flusso low_priority
@@ -428,8 +428,7 @@ static int dev_release(struct inode *inode, struct file *file) {
    mutex_unlock(&(objects[minor].object_busy));
 #endif
 
-   enabled[minor] = 1;
-   //the_object->priority[*(int *)file->private_data] = FREE_ENTRY;
+   //enabled[minor] = 1;
    kfree(file->private_data);
 
    printk("%s: device file closed\n",MODNAME);
@@ -757,7 +756,7 @@ int init_module(void) {
       objects[i].stream_content[1] = low_priority_content;
 	}
 
-	Major = __register_chrdev(0, 0, MINORS, DEVICE_NAME, &fops);
+	Major = __register_chrdev(0, 0, 256, DEVICE_NAME, &fops);
 	//actually allowed minors are directly controlled within this driver
 
 	if (Major < 0) {
