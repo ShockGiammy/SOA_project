@@ -437,8 +437,7 @@ static int dev_release(struct inode *inode, struct file *file) {
    mutex_unlock(&(objects[minor].object_busy));
 #endif
 
-   enabled[minor] = 1;
-   //the_object->priority[*(int *)file->private_data] = FREE_ENTRY;
+   //enabled[minor] = 1;
    kfree(file->private_data);
 
    printk("%s: device file closed\n",MODNAME);
