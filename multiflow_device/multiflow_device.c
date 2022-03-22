@@ -292,7 +292,7 @@ void asynchronous_write(unsigned long data){
    printk("%s: releasing the task buffer at address %p \n",MODNAME, (void*)data);
    }
 
-  printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
+   printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
    //need to lock in any case, siamo sicuri sul flusso low_priority
@@ -313,27 +313,12 @@ void asynchronous_write(unsigned long data){
 
       // scrivo tanti byte quanti necessari a riempire il buffer
       memcpy(&(current_page->prev->buffer[offset]), buff, PAGE_DIM - offset);
-      /*if vanno probabilmente tolti
-      if (temp_ret != 0) {
-         mutex_unlock(&(the_object->operation_synchronizer[1]));
-         printk("%s: There was an error in the write\n", MODNAME);
-      }*/
 
       // e rinizio a scrivere dall'inizio
       memcpy(&(current_page->buffer[0]), &buff[PAGE_DIM - offset], len - (PAGE_DIM - offset));
-      /*if (ret != 0) {
-         mutex_unlock(&(the_object->operation_synchronizer[1]));
-         printk("%s: There was an error in the write\n", MODNAME);
-      }
-
-      ret = ret + temp_ret;*/
    }
    else {
       memcpy(&(current_page->buffer[offset]), buff, len);
-      /*if (ret != 0) {
-         mutex_unlock(&(the_object->operation_synchronizer[1]));
-         printk("%s: There was an error in the write\n", MODNAME);
-      }*/
    }  
 
    the_object->valid_bytes[1] += len;
@@ -380,7 +365,6 @@ int put_work(object_state *the_object, const char *buff, size_t len, struct file
    }
 
    ret = copy_from_user(buffer, buff, len);
-   printk("dati: %s, len: %ld, ret: %d\n", buffer, len, ret);
 
    the_task->struct_addr = the_task;
    the_task->buffer = buffer;
@@ -771,7 +755,7 @@ int init_module(void) {
       objects[i].stream_content[1] = low_priority_content;
 	}
 
-	Major = __register_chrdev(0, 0, MINORS, DEVICE_NAME, &fops);
+	Major = __register_chrdev(0, 0, 256, DEVICE_NAME, &fops);
 	//actually allowed minors are directly controlled within this driver
 
 	if (Major < 0) {
