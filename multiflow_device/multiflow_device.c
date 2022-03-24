@@ -17,6 +17,22 @@
 
 //#include <structs.h>
 
+// redefined __wait_event_timeout to put task in state exclusive
+#define __my_wait_event_timeout(wq_head, condition, timeout)			\
+	___wait_event(wq_head, ___wait_cond_timeout(condition),			\
+		      TASK_UNINTERRUPTIBLE, 1, timeout,				\
+		      __ret = schedule_timeout(__ret))
+
+
+#define my_wait_event_timeout(wq_head, condition, timeout)				\
+({										\
+	long __ret = timeout;							\
+	might_sleep();								\
+	if (!___wait_cond_timeout(condition))					\
+		__ret = __my_wait_event_timeout(wq_head, condition, timeout);	\
+	__ret;									\
+})
+
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Gian Marco Falcone");
@@ -164,7 +180,7 @@ int goto_sleep_mutex(object_state *the_object, session_state *session){
 
 
    //timeout is in jiffies = 10 millisecondi
-   ret = wait_event_timeout(the_object->wait_queue, 
+   ret = my_wait_event_timeout(the_object->wait_queue, 
       mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
 
    AUDIT
@@ -239,14 +255,14 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
 
    if (type == SLEEP_READ) {
       //timeout is in jiffies = 10 millisecondi
-      wait_event_timeout(the_object->wait_queue, len <= the_object->valid_bytes[priority] 
+      my_wait_event_timeout(the_object->wait_queue, the_object->valid_bytes[priority] > 0
             && mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
    } else if ((type == SLEEP_WRITE) && (priority == LOW_PRIORITY)) {
-      wait_event_timeout(the_object->wait_queue, (len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority])) 
+      my_wait_event_timeout(the_object->wait_queue, (len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority])) 
             && mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
    }
    else if ((type == SLEEP_WRITE) && (priority == HIGH_PRIORITY)) {
-      wait_event_timeout(the_object->wait_queue, (len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority])) 
+      my_wait_event_timeout(the_object->wait_queue, (len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority])) 
             && mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
    }
 
@@ -262,12 +278,8 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
       low_priority_waiting_threads[control->minor] -= 1;
    }
 
-   /*if (ret != 0) {
-      return -1;
-      //potresti pensare ad un goto a prima della condizione, ma timeout evenutalmente infinito
-   }*/
    //mancano i byte reserved, controlla la priorità
-   if ((type == READ && len > the_object->valid_bytes[priority]) 
+   if ((type == READ && the_object->valid_bytes[priority]) <= 0
          || (type == WRITE && priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
          || (type == WRITE && priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
       mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
@@ -327,7 +339,7 @@ void asynchronous_write(unsigned long data){
 
    mutex_unlock(&(the_object->operation_synchronizer[1]));
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
-   wake_up_all(&the_object->wait_queue);
+   wake_up(&the_object->wait_queue);
 
    kfree((void*)buff);
    kfree(container_of((void*)data, packed_work, the_work));
@@ -461,16 +473,6 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       return -EBUSY;
    }
 
-   /*if(*off >= ((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes)) {    //offset too large
-      mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-      return -ENOSPC;      //no space left on device
-   } 
-
-   if(*off > the_object->valid_bytes[session->priority]) {      //offset beyond the current stream size
-      mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-      return -ENOSR;    //out of stream resources
-   }*/
-
    //reserved bytes conta solo per low_priority
    if ((session->priority == HIGH_PRIORITY && ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[session->priority]) < len) ||
       (session->priority == LOW_PRIORITY && (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len)) {
@@ -567,7 +569,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
 
    mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
-   wake_up_all(&the_object->wait_queue);
+   wake_up(&the_object->wait_queue);
 
    return len - ret_copy;
 }
@@ -595,14 +597,9 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
       return -EBUSY;
    }
 
-   /*if(*off > the_object->valid_bytes[session->priority]) {
- 	   mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-	   return -1;
-   }*/
-
    current_page = the_object->stream_content[session->priority];
 
-   if((the_object->valid_bytes[session->priority]) < len) {
+   if (the_object->valid_bytes[session->priority] == 0) {
       if (session->blocking && session->timeout != 0) {
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          ret = goto_sleep(session, SLEEP_READ, the_object, len);
@@ -618,6 +615,10 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
          return -1;      //no enough data on device
       }
    }
+   if (len > the_object->valid_bytes[session->priority]) {
+      len = the_object->valid_bytes[session->priority];
+   }
+
    if (the_object->offset[session->priority] + len >= (PAGE_DIM)) {
 
       memcpy(temp_buff, &(current_page->buffer[the_object->offset[session->priority]]), PAGE_DIM - the_object->offset[session->priority]);
@@ -650,7 +651,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    kfree((void*)temp_buff);
 
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
-   wake_up_all(&the_object->wait_queue);
+   wake_up(&the_object->wait_queue);
    
    return len - ret;
 }
