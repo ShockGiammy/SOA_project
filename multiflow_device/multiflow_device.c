@@ -465,7 +465,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    //need to lock in any case
    ret = my_lock(the_object, session);
    if (ret != 0) {
-      kfree((void*)temp_buff)
+      kfree((void*)temp_buff);
       return -EBUSY;
    }
 
@@ -500,7 +500,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       if (pages == MAX_PAGES) {
          printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-         kfree((void*)temp_buff)
+         kfree((void*)temp_buff);
          return -ENOSPC; 
       }
 
@@ -511,7 +511,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          free_page((unsigned long)content->buffer);
          kfree((void*)content);
-         kfree((void*)temp_buff)
+         kfree((void*)temp_buff);
          return -ENOMEM; 
       }
    
@@ -592,7 +592,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    //need to lock in any case
    ret = my_lock(the_object, session);
    if (ret != 0) {
-      kfree((void*)temp_buff)
+      kfree((void*)temp_buff);
       return -EBUSY;
    }
 
@@ -611,7 +611,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
       else {
          printk("%s: Not enough data to read\n", MODNAME);
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-         kfree((void*)temp_buff)
+         kfree((void*)temp_buff);
          return -1;      //no enough data on device
       }
    }
@@ -784,23 +784,23 @@ void cleanup_module(void) {
 	int i;
    list_stream* current_page;
 	for(i = 0; i < MINORS; i++){
-      current_page = (unsigned long)objects[i].stream_content[0];
+      current_page = objects[i].stream_content[0];
       while (current_page->next != NULL) {
          current_page = current_page->next;
-         free_page(current_page->prev->buffer);
-         kfree(current_page->prev);
+         free_page((unsigned long)current_page->prev->buffer);
+         kfree((void*)current_page->prev);
       }
-      free_page(current_page->buffer);
-      kfree(current_page);
+      free_page((unsigned long)current_page->buffer);
+      kfree((void*)current_page);
       
-      current_page = (unsigned long)objects[i].stream_content[1];
+      current_page = objects[i].stream_content[1];
       while (current_page->next != NULL) {
          current_page = current_page->next;
-         free_page(current_page->prev->buffer);
-         kfree(current_page->prev);
+         free_page((unsigned long)current_page->prev->buffer);
+         kfree((void*)current_page->prev);
       }
-      free_page(current_page->buffer); 
-      kfree(current_page);
+      free_page((unsigned long)current_page->buffer); 
+      kfree((void*)current_page);
 	}
 
 	unregister_chrdev(Major, DEVICE_NAME);

@@ -40,6 +40,7 @@ __used __section(__versions) = {
 	{ 0xb44ad4b3, "_copy_to_user" },
 	{ 0x88db9f48, "__check_object_size" },
 	{ 0x4302d0eb, "free_pages" },
+	{ 0x7aec9089, "clear_user" },
 	{ 0xeb233a45, "__kmalloc" },
 	{ 0x92540fbf, "finish_wait" },
 	{ 0x8ddd8aad, "schedule_timeout" },
@@ -64,4 +65,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "");
 
 
-MODULE_INFO(srcversion, "70B0B0BCDAFBEB4D38D598F");
+MODULE_INFO(srcversion, "06E01E04A954582C61EC895");
