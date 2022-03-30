@@ -17,7 +17,7 @@
 
 //#include <structs.h>
 
-// redefined __wait_event_timeout to put task in state exclusive
+//defined in order to put task in state exclusive
 #define __my_wait_event_timeout(wq_head, condition, timeout)			\
 	___wait_event(wq_head, ___wait_cond_timeout(condition),			\
 		      TASK_UNINTERRUPTIBLE, 1, timeout,				\
@@ -101,7 +101,6 @@ static int Major;            /* Major number assigned to broadcast device driver
 enum priority{
    HIGH_PRIORITY,    //0 if high priority
    LOW_PRIORITY,     //1 if low priority
-   FREE_ENTRY        //2 if entry is free
 };
 
 typedef struct _list_stream{
@@ -118,18 +117,18 @@ typedef struct _object_state{
 	struct mutex operation_synchronizer[2];
 	int valid_bytes[2];
    int offset[2];
-	list_stream *stream_content[2];    //the I/O node is a buffer in memory
+	list_stream *stream_content[2];           //the I/O node is a buffer in memory
    int reserved_bytes;
-   wait_queue_head_t wait_queue;
+   wait_queue_head_t wait_queue[2];
 } object_state;
+
+object_state objects[MINORS];
 
 typedef struct _session_state{
    enum priority priority;
    bool blocking;
    unsigned long timeout;
 } session_state;
-
-object_state objects[MINORS];
 
 typedef struct _packed_work{
    void* struct_addr;
@@ -180,7 +179,7 @@ int goto_sleep_mutex(object_state *the_object, session_state *session){
 
 
    //timeout is in jiffies = 10 millisecondi
-   ret = my_wait_event_timeout(the_object->wait_queue, 
+   ret = my_wait_event_timeout(the_object->wait_queue[session->priority], 
       mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
 
    AUDIT
@@ -195,7 +194,6 @@ int goto_sleep_mutex(object_state *the_object, session_state *session){
 
    if (ret == 0) {
       return -1;
-      //potresti pensare ad un goto a prima della condizione, ma timeput evenutalmente infinito
    }
    return 0;
 }
@@ -255,23 +253,21 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
 
    if (type == SLEEP_READ) {
       //timeout is in jiffies = 10 millisecondi
-      my_wait_event_timeout(the_object->wait_queue, the_object->valid_bytes[priority] > 0
-            && mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
+      my_wait_event_timeout(the_object->wait_queue[control->priority], the_object->valid_bytes[priority] > 0
+            && mutex_trylock(&(the_object->operation_synchronizer[control->priority])) == 1, session->timeout*HZ/1000);
    } else if ((type == SLEEP_WRITE) && (priority == LOW_PRIORITY)) {
-      my_wait_event_timeout(the_object->wait_queue, (len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority])) 
-            && mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
+      my_wait_event_timeout(the_object->wait_queue[control->priority], (len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority])) 
+            && mutex_trylock(&(the_object->operation_synchronizer[control->priority])) == 1, session->timeout*HZ/1000);
    }
    else if ((type == SLEEP_WRITE) && (priority == HIGH_PRIORITY)) {
-      my_wait_event_timeout(the_object->wait_queue, (len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority])) 
-            && mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
+      my_wait_event_timeout(the_object->wait_queue[control->priority], (len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority])) 
+            && mutex_trylock(&(the_object->operation_synchronizer[control->priority])) == 1, session->timeout*HZ/1000);
    }
-
-   //ret = my_lock(the_object, session);
 
    AUDIT
    printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
 
-   if (priority == 0) {
+   if (control->priority == 0) {
       high_priority_waiting_threads[control->minor] -= 1;
    }
    else {
@@ -296,7 +292,7 @@ void asynchronous_write(unsigned long data){
    size_t len = container_of((void*)data,packed_work,the_work)->len;
    struct file *filp = container_of((void*)data,packed_work,the_work)->filp;
    int offset;
-   int pages;
+   int pages = 0;
    list_stream* current_page;
    
    AUDIT{
@@ -339,7 +335,7 @@ void asynchronous_write(unsigned long data){
 
    mutex_unlock(&(the_object->operation_synchronizer[1]));
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
-   wake_up(&the_object->wait_queue);
+   wake_up(&the_object->wait_queue[1]);
 
    kfree((void*)buff);
    kfree(container_of((void*)data, packed_work, the_work));
@@ -540,8 +536,6 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          ret = put_work(the_object, temp_buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
-            //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-            //return -1;
          }
       }  
    }
@@ -561,15 +555,13 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          ret = put_work(the_object, temp_buff, len, filp);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
-            //mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-            //return -1;
          }
       }  
    }
 
    mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
-   wake_up(&the_object->wait_queue);
+   wake_up(&the_object->wait_queue[session->priority]);
 
    return len - ret_copy;
 }
@@ -651,7 +643,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    kfree((void*)temp_buff);
 
    //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
-   wake_up(&the_object->wait_queue);
+   wake_up(&the_object->wait_queue[session->priority]);
    
    return len - ret;
 }
@@ -719,8 +711,9 @@ int init_module(void) {
 	//initialize the drive internal state
 	for(i = 0; i < MINORS; i++){
   
-      //Initialize wait queue
-      init_waitqueue_head(&objects[i].wait_queue); //a single queue for each minor
+      //Initialize wait queues
+      init_waitqueue_head(&objects[i].wait_queue[0]); //a high_priority queue for each minor
+      init_waitqueue_head(&objects[i].wait_queue[1]); //a low_priority queue for each minor
 
       high_priority_content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
       high_priority_content->buffer = (char*)__get_free_page(GFP_KERNEL);
