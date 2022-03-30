@@ -624,8 +624,8 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
       memcpy(temp_buff, &(current_page->buffer[the_object->offset[session->priority]]), PAGE_DIM - the_object->offset[session->priority]);
       memcpy(&temp_buff[PAGE_DIM - the_object->offset[session->priority]], &(current_page->next->buffer[0]), 
          len - (PAGE_DIM - the_object->offset[session->priority]));
+      
       //si può deallocare il buffer precedente
-
       the_object->stream_content[session->priority] = current_page->next;
       current_page->next->prev = NULL;
       free_page((unsigned long)current_page->buffer);
@@ -716,19 +716,19 @@ int init_module(void) {
    list_stream* high_priority_content;
    list_stream* low_priority_content;
 
-	//initialize the drive internal state
+	//initialize the driver internal state
 	for(i = 0; i < MINORS; i++){
   
       //Initialize wait queues
       init_waitqueue_head(&objects[i].wait_queue[0]); //a high_priority queue for each minor
       init_waitqueue_head(&objects[i].wait_queue[1]); //a low_priority queue for each minor
 
-      high_priority_content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
+      high_priority_content = kzalloc(sizeof(list_stream), GFP_KERNEL);     //blocking memory allocation
       high_priority_content->buffer = (char*)__get_free_page(GFP_KERNEL);
       high_priority_content->prev = NULL;
       high_priority_content->next = NULL;
 
-      low_priority_content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
+      low_priority_content = kzalloc(sizeof(list_stream), GFP_KERNEL);     //blocking memory allocation
       low_priority_content->buffer = (char*)__get_free_page(GFP_KERNEL);
       low_priority_content->prev = NULL;
       low_priority_content->next = NULL;
@@ -769,7 +769,7 @@ int init_module(void) {
 	return 0;
 
 revert_allocation:
-	for(;i>=0;i--){
+	for(; i >= 0; i--){
 		free_page((unsigned long)objects[i].stream_content[0]->buffer);
       free_page((unsigned long)objects[i].stream_content[1]->buffer);
       kfree((void*)objects[i].stream_content[0]);
@@ -782,11 +782,25 @@ revert_allocation:
 void cleanup_module(void) {
 
 	int i;
-	for(i = 0 ;i < MINORS; i++){
-		free_page((unsigned long)objects[i].stream_content[0]->buffer);
-      free_page((unsigned long)objects[i].stream_content[1]->buffer);
-      kfree((void*)objects[i].stream_content[0]);
-      kfree((void*)objects[i].stream_content[1]);
+   list_stream* current_page;
+	for(i = 0; i < MINORS; i++){
+      current_page = (unsigned long)objects[i].stream_content[0];
+      while (current_page->next != NULL) {
+         current_page = current_page->next;
+         free_page(current_page->prev->buffer);
+         kfree(current_page->prev);
+      }
+      free_page(current_page->buffer);
+      kfree(current_page);
+      
+      current_page = (unsigned long)objects[i].stream_content[1];
+      while (current_page->next != NULL) {
+         current_page = current_page->next;
+         free_page(current_page->prev->buffer);
+         kfree(current_page->prev);
+      }
+      free_page(current_page->buffer); 
+      kfree(current_page);
 	}
 
 	unregister_chrdev(Major, DEVICE_NAME);
