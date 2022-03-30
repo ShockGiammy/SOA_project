@@ -17,7 +17,7 @@
 
 //#include <structs.h>
 
-//defined in order to put task in state exclusive
+//defined in order to put task in sleep with WQ_FLAG_EXCLUSIVE
 #define __my_wait_event_timeout(wq_head, condition, timeout)			\
 	___wait_event(wq_head, ___wait_cond_timeout(condition),			\
 		      TASK_UNINTERRUPTIBLE, 1, timeout,				\
@@ -35,6 +35,7 @@
 
 
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Francesco Quaglia");
 MODULE_AUTHOR("Gian Marco Falcone");
 
 #define MODNAME "MULTI-FLOW DEV"
@@ -61,12 +62,10 @@ MODULE_AUTHOR("Gian Marco Falcone");
 #define SLEEP_WRITE 1
 
 int enabled[MINORS];
-module_param_array(enabled, int, NULL, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
-//S_IROTH = lettura per altri
-//S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP = 0660
+module_param_array(enabled, int, NULL, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);   //0660
 
 long high_priority_valid_bytes[MINORS];
-module_param_array(high_priority_valid_bytes, long, NULL, S_IRUSR | S_IRGRP);
+module_param_array(high_priority_valid_bytes, long, NULL, S_IRUSR | S_IRGRP);    //0440
 
 long high_priority_waiting_threads[MINORS];
 module_param_array(high_priority_waiting_threads, long, NULL, S_IRUSR | S_IRGRP);
@@ -466,6 +465,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    //need to lock in any case
    ret = my_lock(the_object, session);
    if (ret != 0) {
+      kfree((void*)temp_buff)
       return -EBUSY;
    }
 
@@ -482,6 +482,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          }
       }
       else {
+         kfree((void*)temp_buff);
          return -ENOSPC;      //no space left on device
       }
    }
@@ -499,16 +500,18 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       if (pages == MAX_PAGES) {
          printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+         kfree((void*)temp_buff)
          return -ENOSPC; 
       }
 
       content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
-      content->buffer = (char*)__get_free_page(GFP_KERNEL);
+      content->buffer = (char*)__get_free_page(GFP_ATOMIC);
       //controllo che allocazione non fallisca
       if ((content == NULL) || (content->buffer == NULL)) {
+         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          free_page((unsigned long)content->buffer);
          kfree((void*)content);
-         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+         kfree((void*)temp_buff)
          return -ENOMEM; 
       }
    
@@ -583,9 +586,13 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
 
    temp_buff = (char*)kmalloc(len, GFP_ATOMIC);     //non blocking memory allocation
 
+   //verify that the len requested fits the limits of the user buffer. 
+   len = len - clear_user(buff, len);
+
    //need to lock in any case
    ret = my_lock(the_object, session);
    if (ret != 0) {
+      kfree((void*)temp_buff)
       return -EBUSY;
    }
 
@@ -604,6 +611,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
       else {
          printk("%s: Not enough data to read\n", MODNAME);
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+         kfree((void*)temp_buff)
          return -1;      //no enough data on device
       }
    }
