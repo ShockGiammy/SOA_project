@@ -1,6 +1,6 @@
 
 /*  
- *  baseline char device driver with limitation on minor numbers - configurable in terms of concurrency 
+ *  implementation of the multi-flow char device driver
  */
 
 #define EXPORT_SYMTAB
@@ -15,7 +15,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 
-//#include <structs.h>
+#include "structs.h"
 
 //defined in order to put task in sleep with WQ_FLAG_EXCLUSIVE
 #define __my_wait_event_timeout(wq_head, condition, timeout)			\
@@ -43,23 +43,11 @@ MODULE_AUTHOR("Gian Marco Falcone");
 #define AUDIT if(1)
 
 #define MINORS 128
-
-#define BLOCKING 3
-#define NON_BLOCKING 4
-#define TIMEOUT 5
-#define ENABLE 6
-#define DISABLE 7
-
-#define NO (0)
-#define YES (NO+1)
+object_state objects[MINORS];
 
 #define PAGE_DIM (4096) //the size of one page
 #define MAX_PAGES (10)
 
-#define SESSIONS 64
-
-#define SLEEP_READ 0
-#define SLEEP_WRITE 1
 
 int enabled[MINORS];
 module_param_array(enabled, int, NULL, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);   //0660
@@ -96,54 +84,6 @@ static int Major;            /* Major number assigned to broadcast device driver
 #define get_major(session)	MAJOR(session->f_dentry->d_inode->i_rdev)
 #define get_minor(session)	MINOR(session->f_dentry->d_inode->i_rdev)
 #endif
-
-enum priority{
-   HIGH_PRIORITY,    //0 if high priority
-   LOW_PRIORITY,     //1 if low priority
-};
-
-typedef struct _list_stream{
-   char* buffer;
-   struct _list_stream *next;
-   struct _list_stream *prev;
-} list_stream;
-
-typedef struct _object_state{
-#ifdef SINGLE_SESSION_OBJECT
-	struct mutex object_busy;
-#endif
-   int minor;
-	struct mutex operation_synchronizer[2];
-	int valid_bytes[2];
-   int offset[2];
-	list_stream *stream_content[2];           //the I/O node is a buffer in memory
-   int reserved_bytes;
-   wait_queue_head_t wait_queue[2];
-} object_state;
-
-object_state objects[MINORS];
-
-typedef struct _session_state{
-   enum priority priority;
-   bool blocking;
-   unsigned long timeout;
-} session_state;
-
-typedef struct _packed_work{
-   void* struct_addr;
-   object_state *the_object;
-   const char *buffer;
-   size_t len;
-   struct file *filp;
-   struct work_struct the_work;
-} packed_work;
-
-typedef struct _control_record{
-   struct task_struct *task;       
-   int pid;
-   int minor;
-   int priority;
-} control_record;
 
 
 int goto_sleep_mutex(object_state *the_object, session_state *session){
