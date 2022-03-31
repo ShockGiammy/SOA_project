@@ -1,4 +1,3 @@
-
 /*  
  *  implementation of the multi-flow char device driver
  */
@@ -46,7 +45,7 @@ MODULE_AUTHOR("Gian Marco Falcone");
 object_state objects[MINORS];
 
 #define PAGE_DIM (4096) //the size of one page
-#define MAX_PAGES (10)
+#define MAX_PAGES (10)  //the max number of elements in the list
 
 
 int enabled[MINORS];
@@ -102,7 +101,7 @@ int goto_sleep_mutex(object_state *the_object, session_state *session){
    AUDIT
    printk("%s: thread %d going to usleep for %lu millisecs\n", MODNAME, current->pid, session->timeout);
 
-   //Thread waiting for data or mutex
+   //threads waiting for data or mutex
    if (priority == 0) {
       high_priority_waiting_threads[the_object->minor] += 1;
    }
@@ -117,7 +116,7 @@ int goto_sleep_mutex(object_state *the_object, session_state *session){
    control->priority = priority;
 
 
-   //timeout is in jiffies = 10 millisecondi
+   //timeout is in jiffies = 10 milliseconds
    ret = my_wait_event_timeout(the_object->wait_queue[session->priority], 
       mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
 
@@ -151,7 +150,7 @@ int my_lock(object_state *the_object, session_state *session) {
       }
       else {
          printk("%s: Device already in use\n", MODNAME);
-         return -EBUSY;      //no enough data on device
+         return -EBUSY;      //device is busy
       }
    }
    return 0;
@@ -213,7 +212,7 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
       low_priority_waiting_threads[control->minor] -= 1;
    }
 
-   //mancano i byte reserved, controlla la priorità
+   //different condition based on the type of the operation and the priority
    if ((type == READ && the_object->valid_bytes[priority]) <= 0
          || (type == WRITE && priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
          || (type == WRITE && priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
@@ -231,8 +230,8 @@ void asynchronous_write(unsigned long data){
    size_t len = container_of((void*)data,packed_work,the_work)->len;
    struct file *filp = container_of((void*)data,packed_work,the_work)->filp;
    int offset;
-   int pages = 0;
-   list_stream* current_page;
+   int pages;
+   list_stream* current_node;
    
    AUDIT{
    printk("%s: this print comes from kworker daemon with PID=%d - running on CPU-core %d\n", MODNAME, current->pid, smp_processor_id());
@@ -242,30 +241,39 @@ void asynchronous_write(unsigned long data){
    printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
-   //need to lock in any case, siamo sicuri sul flusso low_priority
-   //work queue permettono lavoro bloccante
+   //need to lock in any case, work queue allows blocking operations
+   //we are sure about the low_priority flow
    mutex_lock(&(the_object->operation_synchronizer[1]));
 
    offset = (the_object->valid_bytes[1] + the_object->offset[1]) % PAGE_DIM;
+   pages = (the_object->valid_bytes[1] + the_object->offset[1]) / PAGE_DIM;
 
-   current_page = the_object->stream_content[1];
-   while (current_page->next != NULL) {
-      pages +=1;
-      current_page = current_page->next;
+   current_node = the_object->stream_content[1];
+   while (pages > 0) {
+      current_node = current_node->next;
+      pages--;
    }
 
-   if (len + offset >= (PAGE_DIM)) {
-      // buffer is a the end
-      // occorre allocare un nuovo buffer, e dai limite per evitare attacco Dos
+   if (len + offset >= (PAGE_DIM)) {      //the page is a the end
+      //the new memory space has already been allocated
 
-      // scrivo tanti byte quanti necessari a riempire il buffer
-      memcpy(&(current_page->prev->buffer[offset]), buff, PAGE_DIM - offset);
+      //as many bytes are written as necessary to fill the prev buffer
+      memcpy(&(current_node->buffer[offset]), buff, PAGE_DIM - offset);
 
-      // e rinizio a scrivere dall'inizio
-      memcpy(&(current_page->buffer[0]), &buff[PAGE_DIM - offset], len - (PAGE_DIM - offset));
+      //the remaining bytes are written from the beginning of the new buffer
+      current_node = current_node->next;
+      while(current_node->next != NULL) {
+         memcpy(&(current_node->buffer[0]), &buff[PAGE_DIM - offset + (pages * PAGE_DIM)], PAGE_DIM);
+         current_node = current_node->next;
+         pages++;
+      }
+
+      memcpy(&(current_node->buffer[0]), &buff[PAGE_DIM - offset + (pages * PAGE_DIM)], len - (PAGE_DIM - offset) - (pages * PAGE_DIM));
+
+
    }
    else {
-      memcpy(&(current_page->buffer[offset]), buff, len);
+      memcpy(&(current_node->buffer[offset]), buff, len);
    }  
 
    the_object->valid_bytes[1] += len;
@@ -273,7 +281,7 @@ void asynchronous_write(unsigned long data){
    the_object->reserved_bytes -= len;
 
    mutex_unlock(&(the_object->operation_synchronizer[1]));
-   //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
+   //only the first thread in the queue wakes up (state exclusive)
    wake_up(&the_object->wait_queue[1]);
 
    kfree((void*)buff);
@@ -332,7 +340,7 @@ static int dev_open(struct inode *inode, struct file *file) {
 	   return -ENODEV;
    }
 
-   if (enabled[minor] == 0) {
+   if (enabled[minor] == 0) {    //device file is disabled
       printk("%s: device file is disabled for object with minor %d\n", MODNAME, minor);
       return -EBUSY;
    }
@@ -373,7 +381,6 @@ static int dev_release(struct inode *inode, struct file *file) {
    mutex_unlock(&(objects[minor].object_busy));
 #endif
 
-   //enabled[minor] = 1;
    kfree(file->private_data);
 
    printk("%s: device file closed\n",MODNAME);
@@ -390,17 +397,22 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    int offset;
    object_state *the_object;
    session_state *session = (session_state *)filp->private_data;
-   list_stream* current_page;
-   list_stream* content;
+   list_stream* current_node;
+   list_stream* new_node;
+   list_stream* temp_node;
    char* temp_buff;
+   int new_pages;
 
    int pages = 0;
    the_object = objects + minor;
+   
    printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
             MODNAME, get_major(filp), get_minor(filp));
 
    temp_buff = (char*)kmalloc(len, GFP_ATOMIC);     //non blocking memory allocation
    ret_copy = copy_from_user(temp_buff, buff, len);
+
+   printk("%s: len = %ld, ret = %d\n", MODNAME, len, ret_copy);
 
    //need to lock in any case
    ret = my_lock(the_object, session);
@@ -409,7 +421,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       return -EBUSY;
    }
 
-   //reserved bytes conta solo per low_priority
+   //field reserved_bytes only matters for low_priority flow
    if ((session->priority == HIGH_PRIORITY && ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[session->priority]) < len) ||
       (session->priority == LOW_PRIORITY && (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len)) {
       mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
@@ -428,44 +440,57 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    }
    offset = (the_object->valid_bytes[session->priority] + the_object->offset[session->priority]) % PAGE_DIM;
 
-   current_page = the_object->stream_content[session->priority];
-   while (current_page->next != NULL) {
+   current_node = the_object->stream_content[session->priority];
+   while (current_node->next != NULL) {
       pages +=1;
-      current_page = current_page->next;
+      current_node = current_node->next;
    }
 
-   if (len + offset >= (PAGE_DIM)) {
-      // buffer is a the end
-      // occorre allocare un nuovo buffer, e dai limite per evitare attacco Dos
-      if (pages == MAX_PAGES) {
+   if (len + offset >= (PAGE_DIM)) {      //the page is a the end
+
+      new_pages = (len + offset) / PAGE_DIM;
+      //new elements must be allocated for the list for the current flow, compliant with variable MAX_PAGES
+      if (pages + new_pages >= MAX_PAGES) {
          printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          kfree((void*)temp_buff);
          return -ENOSPC; 
       }
 
-      content = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
-      content->buffer = (char*)__get_free_page(GFP_ATOMIC);
-      //controllo che allocazione non fallisca
-      if ((content == NULL) || (content->buffer == NULL)) {
-         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-         free_page((unsigned long)content->buffer);
-         kfree((void*)content);
-         kfree((void*)temp_buff);
-         return -ENOMEM; 
+      temp_node = current_node;
+      while (new_pages > 0) {
+         new_node = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
+         new_node->buffer = (char*)__get_free_page(GFP_ATOMIC);
+         //checking that memory allocation does not fail
+         if ((new_node == NULL) || (new_node->buffer == NULL)) {
+            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+            free_page((unsigned long)new_node->buffer);
+            kfree((void*)new_node);
+            kfree((void*)temp_buff);
+            return -ENOMEM; 
+         }
+      
+         new_node->prev = temp_node;
+         new_node->next = NULL;
+         temp_node->next = new_node;
+         temp_node = new_node;
+         new_pages--;
       }
-   
-      content->prev = current_page;
-      content->next = NULL;
-      current_page->next = content;
 
       if (session->priority == HIGH_PRIORITY) {
 
-         // scrivo tanti byte quanti necessari a riempire il buffer
-         memcpy(&(current_page->buffer[offset]), temp_buff, PAGE_DIM - offset);
+         //as many bytes are written as necessary to fill the prev buffer
+         memcpy(&(current_node->buffer[offset]), temp_buff, PAGE_DIM - offset);
 
-         // e rinizio a scrivere dall'inizio
-         memcpy(&(content->buffer[0]), &temp_buff[PAGE_DIM - offset], len - (PAGE_DIM - offset));
+         //the remaining bytes are written from the beginning of the new buffers
+         current_node = current_node->next;
+         while(current_node->next != NULL) {
+            memcpy(&(current_node->buffer[0]), &temp_buff[PAGE_DIM - offset + (new_pages * PAGE_DIM)], PAGE_DIM);
+            current_node = current_node->next;
+            new_pages++;
+         }
+
+         memcpy(&(current_node->buffer[0]), &temp_buff[PAGE_DIM - offset + (new_pages * PAGE_DIM)], len - (PAGE_DIM - offset) - (new_pages * PAGE_DIM));
 
          the_object->valid_bytes[session->priority] += (len - ret_copy);
          high_priority_valid_bytes[minor] += (len - ret_copy);
@@ -473,7 +498,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          kfree((void*)temp_buff);
       }
       else {
-         // riservo dei byte! altro campo nella struct
+         //I need to reserve the bytes for the asynchronous write to be sure that will be available space
          the_object->reserved_bytes += len;
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          ret = put_work(the_object, temp_buff, len, filp);
@@ -484,7 +509,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    }
    else {
       if (session->priority == HIGH_PRIORITY) {
-         memcpy(&(current_page->buffer[offset]), temp_buff, len);
+         memcpy(&(current_node->buffer[offset]), temp_buff, len);
 
          the_object->valid_bytes[session->priority] += (len - ret_copy);
          high_priority_valid_bytes[minor] += (len - ret_copy);
@@ -492,7 +517,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          kfree((void*)temp_buff);
       }
       else {
-         // riservo dei byte! altro campo nella struct
+         //I need to reserve the bytes for the asynchronous write to be sure that will be available space
          the_object->reserved_bytes += len;
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          ret = put_work(the_object, temp_buff, len, filp);
@@ -503,7 +528,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    }
 
    mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-   //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
+   //only the first thread in the queue wakes up (state exclusive)
    wake_up(&the_object->wait_queue[session->priority]);
 
    return len - ret_copy;
@@ -515,8 +540,10 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    int minor = get_minor(filp);
    int ret;
    object_state *the_object;
-   list_stream* current_page;
+   list_stream* current_node;
    char *temp_buff;
+   int pages_to_read;
+   int pages_read = 0;
 
    session_state *session = (session_state *)filp->private_data;
 
@@ -536,7 +563,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
       return -EBUSY;
    }
 
-   current_page = the_object->stream_content[session->priority];
+   current_node = the_object->stream_content[session->priority];
 
    if (the_object->valid_bytes[session->priority] == 0) {
       if (session->blocking && session->timeout != 0) {
@@ -561,18 +588,35 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
 
    if (the_object->offset[session->priority] + len >= (PAGE_DIM)) {
 
-      memcpy(temp_buff, &(current_page->buffer[the_object->offset[session->priority]]), PAGE_DIM - the_object->offset[session->priority]);
-      memcpy(&temp_buff[PAGE_DIM - the_object->offset[session->priority]], &(current_page->next->buffer[0]), 
+      pages_to_read = ((the_object->offset[session->priority] + len) / PAGE_DIM) - 1;
+
+      memcpy(temp_buff, &(current_node->buffer[the_object->offset[session->priority]]), PAGE_DIM - the_object->offset[session->priority]);
+
+      while (pages_read < pages_to_read) {
+         memcpy(&temp_buff[(PAGE_DIM - the_object->offset[session->priority]) + (pages_read * PAGE_DIM)],
+            &(current_node->next->buffer[0]), PAGE_DIM);
+
+         //it is possible to deallocate the previous buffers (data are completely read)
+         the_object->stream_content[session->priority] = current_node->next;
+         current_node->next->prev = NULL;
+         free_page((unsigned long)current_node->buffer);
+         kfree((void*)current_node);
+
+         current_node = the_object->stream_content[session->priority];
+         pages_read++;
+      }
+
+      memcpy(&temp_buff[(PAGE_DIM - the_object->offset[session->priority]) + (pages_read * PAGE_DIM)], &(current_node->next->buffer[0]), 
          len - (PAGE_DIM - the_object->offset[session->priority]));
       
-      //si può deallocare il buffer precedente
-      the_object->stream_content[session->priority] = current_page->next;
-      current_page->next->prev = NULL;
-      free_page((unsigned long)current_page->buffer);
-      kfree((void*)current_page);
+      //it is possible to deallocate the previous buffers (data are completely read)
+      the_object->stream_content[session->priority] = current_node->next;
+      current_node->next->prev = NULL;
+      free_page((unsigned long)current_node->buffer);
+      kfree((void*)current_node);
    } 
    else {
-      memcpy(temp_buff, &(current_page->buffer[the_object->offset[session->priority]]), len);
+      memcpy(temp_buff, &(current_node->buffer[the_object->offset[session->priority]]), len);
    }
 
    the_object->valid_bytes[session->priority] -= (len - ret);
@@ -590,7 +634,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    ret = copy_to_user(buff, temp_buff, len);
    kfree((void*)temp_buff);
 
-   //potrebbe essere che solo alcuni thread soddisfino la condizione sulla lunghezza
+   //only the first thread in the queue wakes up (state exclusive)
    wake_up(&the_object->wait_queue[session->priority]);
    
    return len - ret;
@@ -640,7 +684,7 @@ static long dev_ioctl(struct file *filp, unsigned int command, unsigned long par
 
 
 static struct file_operations fops = {
-   .owner = THIS_MODULE,//do not forget this
+   .owner = THIS_MODULE,   //do not forget this
    .write = dev_write,
    .read = dev_read,
    .open =  dev_open,

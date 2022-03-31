@@ -16,25 +16,26 @@ void * the_thread(void* path){
 	char* device;
 	int fd;
 	int ret;
+	char ret_buff[4096];
 
 	device = (char*)path;
 	sleep(1);
 
 	printf("opening device %s\n",device);
-	fd = open(device,O_RDWR);
+	fd = open(device, O_RDWR);
 	if(fd == -1) {
 		printf("open error on device %s\n",device);
 		return NULL;
 	}
 	printf("device %s successfully opened\n",device);
-	ioctl(fd, 1); 	//low_priority
+	//ioctl(fd, 1); 	//low_priority
 	ioctl(fd, 3);	//blocking
 	ioctl(fd, 5, 30000);	//timeout
 	//ioctl(fd, 4);	//non-blocking
 	//ioctl(fd, 0);	//high_priority
 	//ret = write(fd, DATA, SIZE);
-	ret = read(fd, buff, SIZE);
-	printf("%s", buff);
+	ret = read(fd, ret_buff, SIZE-1);
+	printf("%s", ret_buff);
 	printf("%d\n", ret);
 	return NULL;
 

@@ -6,7 +6,8 @@
 #include <pthread.h>
 #include <sys/ioctl.h>
 
-#define PAGE_DIM (4096) //the size of one page
+#define PAGE_DIM (4096) 		//the size of one page
+#define MAX_SIZE (PAGE_DIM*4)	//max size te user application can manage
 
 //int i;
 
@@ -130,8 +131,8 @@ int call_ioctl(int fd) {
 
 int main(int argc, char** argv){
 
-    char buff[PAGE_DIM];
-	char data[PAGE_DIM];
+    char buff[MAX_SIZE];
+	char data[MAX_SIZE];
 	char device[50];
 	int fd = -1;
 	int decision;
@@ -184,7 +185,8 @@ int main(int argc, char** argv){
 				}
 				else {
 					printf("\nWhat data do you want to write?\n");
-					fgets(data, PAGE_DIM, stdin);
+					fgets(data, MAX_SIZE, stdin);
+					printf("data are %ld bytes\n", strlen(data));
 					ret = write(fd, data, strlen(data));
 					if (ret == -1) {
 						printf("Error in write operation\n");
@@ -201,7 +203,7 @@ int main(int argc, char** argv){
 				}
 				else {
 					printf("\nHow many data do you want to read?\n");
-					fgets(data, PAGE_DIM, stdin);
+					fgets(data, MAX_SIZE, stdin);
 					int len = strtol(data, NULL, 10);
 					ret = read(fd, buff, len);
 					if (ret == -1) {

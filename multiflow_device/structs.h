@@ -34,7 +34,7 @@ typedef struct _object_state{
 	struct mutex operation_synchronizer[2];
 	int valid_bytes[2];
    int offset[2];
-	list_stream *stream_content[2];           //the I/O node is a buffer in memory
+	list_stream *stream_content[2];
    int reserved_bytes;
    wait_queue_head_t wait_queue[2];
 } object_state;
