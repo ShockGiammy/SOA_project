@@ -484,7 +484,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
             //if fails, all the new allocated buffers have to be deleted
             while(current_node->next != NULL) {
                temp_node = current_node->next;
-               current_node->next = temp_node->next
+               current_node->next = temp_node->next;
                free_page((unsigned long)temp_node->buffer);
                kfree((void*)temp_node);
             }

@@ -1,1 +1,1 @@
-cmd_/mnt/hgfs/SOA_project/multiflow_device_driver/multiflow_device_driver.mod := { echo  /mnt/hgfs/SOA_project/multiflow_device_driver/multiflow_device_driver.o;  echo; } > /mnt/hgfs/SOA_project/multiflow_device_driver/multiflow_device_driver.mod
+cmd_/home/gian/Documenti/GitHub/SOA_project/multiflow_device_driver/multiflow_device_driver.mod := { echo  /home/gian/Documenti/GitHub/SOA_project/multiflow_device_driver/multiflow_device_driver.o;  echo; } > /home/gian/Documenti/GitHub/SOA_project/multiflow_device_driver/multiflow_device_driver.mod

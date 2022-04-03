@@ -28,7 +28,7 @@ void * the_thread(void* path){
 		return NULL;
 	}
 	printf("device %s successfully opened\n",device);
-	//ioctl(fd, 1); 	//low_priority
+	ioctl(fd, 1); 	//low_priority
 	ioctl(fd, 3);	//blocking
 	ioctl(fd, 5, 30000);	//timeout
 	//ioctl(fd, 4);	//non-blocking
