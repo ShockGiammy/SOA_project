@@ -16,21 +16,41 @@
 
 #include "structs.h"
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0)
 //defined in order to put task in sleep with WQ_FLAG_EXCLUSIVE
 #define __my_wait_event_timeout(wq_head, condition, timeout)			\
-	___wait_event(wq_head, ___wait_cond_timeout(condition),			\
-		      TASK_UNINTERRUPTIBLE, 1, timeout,				\
-		      __ret = schedule_timeout(__ret))
+      ___wait_event(wq_head, ___wait_cond_timeout(condition),			\
+         TASK_UNINTERRUPTIBLE, 1, timeout,				               \
+         __ret = schedule_timeout(__ret))       
 
-
-#define my_wait_event_timeout(wq_head, condition, timeout)				\
-({										\
-	long __ret = timeout;							\
-	might_sleep();								\
-	if (!___wait_cond_timeout(condition))					\
-		__ret = __my_wait_event_timeout(wq_head, condition, timeout);	\
-	__ret;									\
+#define my_wait_event_timeout(wq_head, condition, timeout)				   \
+({										                                          \
+	long __ret = timeout;							                           \
+	might_sleep();								                                 \
+   if (!___wait_cond_timeout(condition))					               \
+      __ret = __my_wait_event_timeout(wq_head, condition, timeout);	\
+   __ret;							                                       \
 })
+#else
+#define my_wait_event_timeout(wq, condition, timeout)       \
+({                                                                   \
+	wait_event_timeout(wq, condition, timeout);		 \
+})     
+#endif
+
+#define control_awake_cond(condition, mutex)        \
+({                                              \
+   int __ret = 0;                               \
+   if (mutex_trylock(mutex)) {                  \
+      if (condition)   {                        \
+         __ret = 1;                             \
+      } else {                                  \
+         mutex_unlock(mutex);                   \
+      }                                         \
+   }                                            \
+   __ret;                                       \
+})
+
 
 
 MODULE_LICENSE("GPL");
@@ -188,20 +208,19 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
    control->minor = the_object->minor;
    control->priority = priority;
 
-
    if (type == SLEEP_READ) {
       //timeout is in jiffies = 10 millisecondi
-      my_wait_event_timeout(the_object->wait_queue[control->priority], the_object->valid_bytes[priority] > 0
-            && mutex_trylock(&(the_object->operation_synchronizer[control->priority])) == 1, session->timeout*HZ/1000);
+      my_wait_event_timeout(the_object->wait_queue[control->priority], control_awake_cond(the_object->valid_bytes[priority] > 0,
+            &(the_object->operation_synchronizer[control->priority])), session->timeout*HZ/1000);
    } else if ((type == SLEEP_WRITE) && (priority == LOW_PRIORITY)) {
-      my_wait_event_timeout(the_object->wait_queue[control->priority], (len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority])) 
-            && mutex_trylock(&(the_object->operation_synchronizer[control->priority])) == 1, session->timeout*HZ/1000);
+      my_wait_event_timeout(the_object->wait_queue[control->priority], control_awake_cond(len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority]), 
+            &(the_object->operation_synchronizer[control->priority])), session->timeout*HZ/1000);
    }
    else if ((type == SLEEP_WRITE) && (priority == HIGH_PRIORITY)) {
-      my_wait_event_timeout(the_object->wait_queue[control->priority], (len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority])) 
-            && mutex_trylock(&(the_object->operation_synchronizer[control->priority])) == 1, session->timeout*HZ/1000);
+      my_wait_event_timeout(the_object->wait_queue[control->priority], control_awake_cond(len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]),
+            &(the_object->operation_synchronizer[control->priority])), session->timeout*HZ/1000);
    }
-
+   
    AUDIT
    printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
 
@@ -213,10 +232,9 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
    }
 
    //different condition based on the type of the operation and the priority
-   if ((type == READ && the_object->valid_bytes[priority]) <= 0
-         || (type == WRITE && priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
-         || (type == WRITE && priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
-      mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+   if ((type == READ && the_object->valid_bytes[control->priority] <= 0)
+         || (type == WRITE && control->priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
+         || (type == WRITE && control->priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
       return -1;
    }
    return 0;
@@ -412,8 +430,6 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    temp_buff = (char*)kmalloc(len, GFP_ATOMIC);     //non blocking memory allocation
    ret_copy = copy_from_user(temp_buff, buff, len);
 
-   printk("%s: len = %ld, ret = %d\n", MODNAME, len, ret_copy);
-
    //need to lock in any case
    ret = my_lock(the_object, session);
    if (ret != 0) {
@@ -429,8 +445,8 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          ret = goto_sleep(session, SLEEP_WRITE, the_object, len);
          if (ret == -1) {
             printk("%s: The timeout elapsed and there are not enough available sapce\n", MODNAME);
-            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-            return -1;      //no enough data on device
+            kfree((void*)temp_buff);
+            return 0;      //no enough data on device
          }
       }
       else {
@@ -463,10 +479,17 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          new_node->buffer = (char*)__get_free_page(GFP_ATOMIC);
          //checking that memory allocation does not fail
          if ((new_node == NULL) || (new_node->buffer == NULL)) {
-            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
             free_page((unsigned long)new_node->buffer);
             kfree((void*)new_node);
+            //if fails, all the new allocated buffers have to be deleted
+            while(current_node->next != NULL) {
+               temp_node = current_node->next;
+               current_node->next = temp_node->next
+               free_page((unsigned long)temp_node->buffer);
+               kfree((void*)temp_node);
+            }
             kfree((void*)temp_buff);
+            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
             return -ENOMEM; 
          }
       
@@ -505,6 +528,9 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
          }
+         //only the first thread in the queue wakes up (state exclusive)
+         wake_up(&the_object->wait_queue[session->priority]);
+         return len - ret_copy;
       }  
    }
    else {
@@ -524,6 +550,9 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
          }
+         //only the first thread in the queue wakes up (state exclusive)
+         wake_up(&the_object->wait_queue[session->priority]);
+         return len - ret_copy;
       }  
    }
 
@@ -571,15 +600,14 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
          ret = goto_sleep(session, SLEEP_READ, the_object, len);
          if (ret == -1) {
             printk("%s: The timeout elapsed and there are not enough data to read\n", MODNAME);
-            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-            return -1;      //no enough data on device
+            return 0;      //no enough data on device
          }
       }
       else {
          printk("%s: Not enough data to read\n", MODNAME);
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          kfree((void*)temp_buff);
-         return -1;      //no enough data on device
+         return 0;      //no enough data on device
       }
    }
    if (len > the_object->valid_bytes[session->priority]) {

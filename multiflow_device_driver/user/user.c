@@ -186,9 +186,8 @@ int main(int argc, char** argv){
 				else {
 					printf("\nWhat data do you want to write?\n");
 					fgets(data, MAX_SIZE, stdin);
-					printf("data are %ld bytes\n", strlen(data));
 					ret = write(fd, data, strlen(data));
-					if (ret == -1) {
+					if (ret == 0) {
 						printf("Error in write operation\n");
 					}
 					else {
@@ -206,7 +205,7 @@ int main(int argc, char** argv){
 					fgets(data, MAX_SIZE, stdin);
 					int len = strtol(data, NULL, 10);
 					ret = read(fd, buff, len);
-					if (ret == -1) {
+					if (ret == 0) {
 						printf("Not enough data to read\n");
 					}
 					else {
