@@ -52,14 +52,13 @@
 })
 
 
-
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Francesco Quaglia");
 MODULE_AUTHOR("Gian Marco Falcone");
 
 #define MODNAME "MULTI-FLOW DEV"
 
-#define AUDIT if(1)
+#define AUDIT
 
 #define MINORS 128
 object_state objects[MINORS];
