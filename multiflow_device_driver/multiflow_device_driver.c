@@ -443,7 +443,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       if (session->blocking && session->timeout != 0) {
          ret = goto_sleep(session, SLEEP_WRITE, the_object, len);
          if (ret == -1) {
-            printk("%s: The timeout elapsed and there are not enough available sapce\n", MODNAME);
+            printk("%s: The timeout elapsed and there are not enough available space\n", MODNAME);
             kfree((void*)temp_buff);
             return 0;      //no enough data on device
          }

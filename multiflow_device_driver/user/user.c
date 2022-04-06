@@ -9,21 +9,22 @@
 #define PAGE_DIM (4096) 		//the size of one page
 #define MAX_SIZE (PAGE_DIM*4)	//max size te user application can manage
 
-//int i;
 
 int open_device(char* device); 
-//int create_device(char* path, long major, long minor);
+int create_device(char* path, long major, long minor);
 
 
-/*int create_device(char* path, long major, long minor) {
+int create_device(char* path, long major, long minor) {
+
+	char buff[PAGE_DIM];
 
     printf("creating minor number %ld for device %s with major %ld\n", minor, path, major);
 
-    sprintf(buff, "mknod %s%d c %ld %i\n", path, i, major, i);
+    sprintf(buff, "mknod %s%ld c %ld %li\n", path, minor, major, minor);
 	system(buff);
-	sprintf(buff, "%s%d", path, i);
+	sprintf(buff, "%s%ld", path, minor);
 	return 0;
-}*/
+}
 
 
 int open_device(char* device) {
@@ -138,20 +139,19 @@ int main(int argc, char** argv){
 	int decision;
 	char cmd[3];
 	int ret;
-	//long major = (long)info;
-	//int i = 0;
+	long major;
+	long minor;
 
 	while(1) {
 		memset(cmd, 0, sizeof(char)*(strlen(cmd)+1));
 		if (fd == -1) {
 			printf("\nChoose an operation:\n");
-			//printf("0) Create a new device driver\n");
+			printf("0) Create and open a new device driver\n");
 			printf("1) Open an existing device driver\n");
 			printf("5) Exit from the application\n");
 		}
 		else {
 			printf("\n\nChoose an operation to perform on the device driver:\n");
-			//printf("0) Create a new device driver\n");
 			printf("1) Close the actual device and open an other one\n");
 			printf("2) Write data to opened device\n");
 			printf("3) Read data from opened device\n");
@@ -161,14 +161,25 @@ int main(int argc, char** argv){
 		fgets(cmd, 3, stdin);
 		decision = strtol(cmd, NULL, 10);
 		switch(decision) {
-			/*case 0:
-				printf("What device driver do you want to create?\n");
-				scanf("%s", device);
-				create_device(device, major, i);
-				i++;
-				close(fd);
-				fd = open_device(device);
-				break;*/
+			case 0:
+				if (fd == -1) {
+					printf("	What device driver do you want to create?\n");
+					fgets(device, 50, stdin);
+					device[strcspn(device, "\n")] = 0;;	//in order to replace "\n" (last character) with "\0"
+					printf("	Insert the driver's major number?\n");
+					fgets(data, 50, stdin);
+					major = strtol(data, NULL, 10);
+					printf("	Insert the minor number?\n");
+					fgets(data, 50, stdin);
+					minor = strtol(data, NULL, 10);
+					create_device(device, major, minor);
+					data[strcspn(data, "\n")] = 0;
+					strcat(device, data);
+					fd = open_device(device);
+					memset(device, 0, sizeof(char)*(strlen(device)+1));
+					memset(data, 0, sizeof(char)*(strlen(data)+1));
+				}
+				break;
 			case 1:
 				if (fd != -1) {
 					memset(device, 0, sizeof(char)*(strlen(device)+1));
