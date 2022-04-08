@@ -163,8 +163,8 @@ int my_lock(object_state *the_object, session_state *session) {
       if (session->blocking && session->timeout != 0) {
          ret = goto_sleep_mutex(the_object, session);
          if (ret == -1) {
-            printk("%s: The timeout elapsed and there are not enough data to read\n", MODNAME);
-            return -1;      //no enough data on device
+            printk("%s: The timeout elapsed\n", MODNAME);
+            return -1;
          }
       }
       else {
@@ -181,7 +181,6 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
 	control_record data;
    control_record* control;
    int priority = session->priority;
-   //int ret;
 
    if(session->timeout == 0) {
       return -1;
