@@ -47,16 +47,8 @@ typedef struct _session_state{
 
 typedef struct _packed_work{
    void* struct_addr;
-   object_state *the_object;
    const char *buffer;
    size_t len;
-   struct file *filp;
+   int minor;
    struct work_struct the_work;
 } packed_work;
-
-typedef struct _control_record{
-   struct task_struct *task;       
-   int pid;
-   int minor;
-   int priority;
-} control_record;

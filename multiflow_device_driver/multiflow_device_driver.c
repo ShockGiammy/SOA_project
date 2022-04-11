@@ -106,16 +106,12 @@ static int Major;            /* Major number assigned to broadcast device driver
 
 int goto_sleep_mutex(object_state *the_object, session_state *session){
 
-	control_record data;
-   control_record* control;
    int priority = session->priority;
    int ret;
 
    if(session->timeout == 0) {
       return -1;
    }
-
-   control = &data;     //set the pointer to the current stack area
 
    AUDIT
    printk("%s: thread %d going to usleep for %lu millisecs\n", MODNAME, current->pid, session->timeout);
@@ -129,12 +125,6 @@ int goto_sleep_mutex(object_state *the_object, session_state *session){
    }
 
 
-   control->task = current;
-   control->pid  = current->pid;
-   control->minor = the_object->minor;
-   control->priority = priority;
-
-
    //timeout is in jiffies = 10 milliseconds
    ret = my_wait_event_timeout(the_object->wait_queue[session->priority], 
       mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
@@ -143,10 +133,10 @@ int goto_sleep_mutex(object_state *the_object, session_state *session){
    printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
 
    if (priority == 0) {
-      high_priority_waiting_threads[control->minor] -= 1;
+      high_priority_waiting_threads[the_object->minor] -= 1;
    }
    else {
-      low_priority_waiting_threads[control->minor] -= 1;
+      low_priority_waiting_threads[the_object->minor] -= 1;
    }
 
    if (ret == 0) {
@@ -178,15 +168,12 @@ int my_lock(object_state *the_object, session_state *session) {
 
 int goto_sleep(session_state *session, int type, object_state *the_object, size_t len){
 
-	control_record data;
-   control_record* control;
    int priority = session->priority;
+   int minor = the_object->minor;
 
    if(session->timeout == 0) {
       return -1;
    }
-
-   control = &data;     //set the pointer to the current stack area
 
    AUDIT
    printk("%s: thread %d going to usleep for %lu millisecs\n", MODNAME, current->pid, session->timeout);
@@ -194,43 +181,37 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
    //Are taken into account both threads waiting to read and threads waiting to write.
    //It is very unlikely that both are present at the same time.
    if (priority == 0) {
-      high_priority_waiting_threads[the_object->minor] += 1;
+      high_priority_waiting_threads[minor] += 1;
    }
    else {
-      low_priority_waiting_threads[the_object->minor] += 1;
+      low_priority_waiting_threads[minor] += 1;
    }
-
-
-   control->task = current;
-   control->pid  = current->pid;
-   control->minor = the_object->minor;
-   control->priority = priority;
 
    if (type == SLEEP_READ) {
       //timeout is in jiffies = 10 millisecondi
-      my_wait_event_timeout(the_object->wait_queue[control->priority], control_awake_cond(the_object->valid_bytes[priority] > 0,
-            &(the_object->operation_synchronizer[control->priority])), session->timeout*HZ/1000);
+      my_wait_event_timeout(the_object->wait_queue[priority], control_awake_cond(the_object->valid_bytes[priority] > 0,
+            &(the_object->operation_synchronizer[priority])), session->timeout*HZ/1000);
    } else if ((type == SLEEP_WRITE) && (priority == LOW_PRIORITY)) {
-      my_wait_event_timeout(the_object->wait_queue[control->priority], control_awake_cond(len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority]), 
-            &(the_object->operation_synchronizer[control->priority])), session->timeout*HZ/1000);
+      my_wait_event_timeout(the_object->wait_queue[priority], control_awake_cond(len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority]), 
+            &(the_object->operation_synchronizer[priority])), session->timeout*HZ/1000);
    }
    else if ((type == SLEEP_WRITE) && (priority == HIGH_PRIORITY)) {
-      my_wait_event_timeout(the_object->wait_queue[control->priority], control_awake_cond(len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]),
-            &(the_object->operation_synchronizer[control->priority])), session->timeout*HZ/1000);
+      my_wait_event_timeout(the_object->wait_queue[priority], control_awake_cond(len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]),
+            &(the_object->operation_synchronizer[priority])), session->timeout*HZ/1000);
    }
    
    AUDIT
    printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
 
-   if (control->priority == 0) {
-      high_priority_waiting_threads[control->minor] -= 1;
+   if (priority == 0) {
+      high_priority_waiting_threads[minor] -= 1;
    }
    else {
-      low_priority_waiting_threads[control->minor] -= 1;
+      low_priority_waiting_threads[minor] -= 1;
    }
 
    //different condition based on the type of the operation and the priority
-   if ((type == READ && the_object->valid_bytes[control->priority] <= 0)
+   if ((type == READ && the_object->valid_bytes[priority] <= 0)
          || (type == WRITE && control->priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
          || (type == WRITE && control->priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
       return -1;
@@ -241,10 +222,11 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
 
 void asynchronous_write(unsigned long data){
 
-   object_state *the_object = container_of((void*)data,packed_work,the_work)->the_object;
+   object_state *the_object;
    const char *buff = container_of((void*)data,packed_work,the_work)->buffer;
    size_t len = container_of((void*)data,packed_work,the_work)->len;
-   struct file *filp = container_of((void*)data,packed_work,the_work)->filp;
+   int minor = container_of((void*)data,packed_work,the_work)->minor;
+   the_object = objects + minor;
    int offset;
    int pages;
    list_stream* current_node;
@@ -254,8 +236,7 @@ void asynchronous_write(unsigned long data){
    printk("%s: releasing the task buffer at address %p \n",MODNAME, (void*)data);
    }
 
-   printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
-            MODNAME, get_major(filp), get_minor(filp));
+   printk("%s: somebody called a write on dev with minor number: %d\n", MODNAME, minor);
 
    //need to lock in any case, work queue allows blocking operations
    //we are sure about the low_priority flow
@@ -293,7 +274,7 @@ void asynchronous_write(unsigned long data){
    }  
 
    the_object->valid_bytes[1] += len;
-   low_priority_valid_bytes[get_minor(filp)] += len;
+   low_priority_valid_bytes[minor] += len;
    the_object->reserved_bytes -= len;
 
    mutex_unlock(&(the_object->operation_synchronizer[1]));
@@ -307,7 +288,7 @@ void asynchronous_write(unsigned long data){
 }
 
 
-int put_work(object_state *the_object, char *buff, size_t len, struct file *filp){
+int put_work(char *buff, size_t len, int minor){
    
    packed_work *the_task;
 
@@ -329,9 +310,8 @@ int put_work(object_state *the_object, char *buff, size_t len, struct file *filp
 
    the_task->struct_addr = the_task;
    the_task->buffer = buff;
-   the_task->the_object = the_object;
    the_task->len = len;
-   the_task->filp = filp;
+   the_task->minor = minor;
 
    AUDIT
    printk("%s: work buffer allocation success - address is %p\n", MODNAME, the_task);
@@ -340,6 +320,39 @@ int put_work(object_state *the_object, char *buff, size_t len, struct file *filp
    schedule_work(&the_task->the_work);
 
    return 0;
+}
+
+int allocate_pages() {
+   if (len >= (PAGE_DIM)) {
+
+      new_pages = len / PAGE_DIM;
+
+      while (new_pages > 0) {
+         new_node = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
+         new_node->buffer = (char*)__get_free_page(GFP_ATOMIC);
+         //checking that memory allocation does not fail
+         if ((new_node == NULL) || (new_node->buffer == NULL)) {
+            free_page((unsigned long)new_node->buffer);
+            kfree((void*)new_node);
+            //if fails, all the new allocated buffers have to be deleted
+            while(current_node->next != NULL) {
+               temp_node = current_node->next;
+               current_node->next = temp_node->next;
+               free_page((unsigned long)temp_node->buffer);
+               kfree((void*)temp_node);
+            }
+            kfree((void*)temp_buff);
+            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+            return -ENOMEM; 
+         }
+      
+         new_node->prev = temp_node;
+         new_node->next = NULL;
+         temp_node->next = new_node;
+         temp_node = new_node;
+         new_pages--;
+      }
+   }
 }
 
 
@@ -427,6 +440,9 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
 
    temp_buff = (char*)kmalloc(len, GFP_ATOMIC);     //non blocking memory allocation
    ret_copy = copy_from_user(temp_buff, buff, len);
+
+   // allocation of the necessary pages outside the critical section
+   allocate_pages();
 
    //need to lock in any case
    ret = my_lock(the_object, session);
@@ -522,7 +538,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          //I need to reserve the bytes for the asynchronous write to be sure that will be available space
          the_object->reserved_bytes += len;
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-         ret = put_work(the_object, temp_buff, len, filp);
+         ret = put_work(temp_buff, len, minor);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
          }
@@ -544,7 +560,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          //I need to reserve the bytes for the asynchronous write to be sure that will be available space
          the_object->reserved_bytes += len;
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-         ret = put_work(the_object, temp_buff, len, filp);
+         ret = put_work(temp_buff, len, minor);
          if (ret != 0) {
             printk("%s: There was an error with deferred work\n", MODNAME);
          }
