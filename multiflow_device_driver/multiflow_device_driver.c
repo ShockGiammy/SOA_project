@@ -104,6 +104,28 @@ static int Major;            /* Major number assigned to broadcast device driver
 #endif
 
 
+void decrement_waiting_threads(int priority, int minor) {
+   if (priority == 0) {
+      high_priority_waiting_threads[minor] -= 1;
+   }
+   else {
+      low_priority_waiting_threads[minor] -= 1;
+   }
+}
+
+
+void increment_waiting_threads(int priority, int minor) {
+   //Are taken into account both threads waiting to read and threads waiting to write.
+   //It is very unlikely that both are present at the same time.
+   if (priority == 0) {
+      high_priority_waiting_threads[minor] += 1;
+   }
+   else {
+      low_priority_waiting_threads[minor] += 1;
+   }
+}
+
+
 int goto_sleep_mutex(object_state *the_object, session_state *session){
 
    int priority = session->priority;
@@ -116,28 +138,12 @@ int goto_sleep_mutex(object_state *the_object, session_state *session){
    AUDIT
    printk("%s: thread %d going to usleep for %lu millisecs\n", MODNAME, current->pid, session->timeout);
 
-   //threads waiting for data or mutex
-   if (priority == 0) {
-      high_priority_waiting_threads[the_object->minor] += 1;
-   }
-   else {
-      low_priority_waiting_threads[the_object->minor] += 1;
-   }
-
-
    //timeout is in jiffies = 10 milliseconds
-   ret = my_wait_event_timeout(the_object->wait_queue[session->priority], 
-      mutex_trylock(&(the_object->operation_synchronizer[session->priority])) == 1, session->timeout*HZ/1000);
+   ret = my_wait_event_timeout(the_object->wait_queue[priority], 
+      mutex_trylock(&(the_object->operation_synchronizer[priority])) == 1, session->timeout*HZ/1000);
 
    AUDIT
    printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
-
-   if (priority == 0) {
-      high_priority_waiting_threads[the_object->minor] -= 1;
-   }
-   else {
-      low_priority_waiting_threads[the_object->minor] -= 1;
-   }
 
    if (ret == 0) {
       return -1;
@@ -168,6 +174,7 @@ int my_lock(object_state *the_object, session_state *session) {
 
 int goto_sleep(session_state *session, int type, object_state *the_object, size_t len){
 
+   int ret;
    int priority = session->priority;
    int minor = the_object->minor;
 
@@ -178,44 +185,36 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
    AUDIT
    printk("%s: thread %d going to usleep for %lu millisecs\n", MODNAME, current->pid, session->timeout);
 
-   //Are taken into account both threads waiting to read and threads waiting to write.
-   //It is very unlikely that both are present at the same time.
-   if (priority == 0) {
-      high_priority_waiting_threads[minor] += 1;
-   }
-   else {
-      low_priority_waiting_threads[minor] += 1;
-   }
-
    if (type == SLEEP_READ) {
       //timeout is in jiffies = 10 millisecondi
-      my_wait_event_timeout(the_object->wait_queue[priority], control_awake_cond(the_object->valid_bytes[priority] > 0,
+      ret = my_wait_event_timeout(the_object->wait_queue[priority], control_awake_cond(the_object->valid_bytes[priority] > 0,
             &(the_object->operation_synchronizer[priority])), session->timeout*HZ/1000);
    } else if ((type == SLEEP_WRITE) && (priority == LOW_PRIORITY)) {
-      my_wait_event_timeout(the_object->wait_queue[priority], control_awake_cond(len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority]), 
+      ret = my_wait_event_timeout(the_object->wait_queue[priority], control_awake_cond(len <= (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[priority]), 
             &(the_object->operation_synchronizer[priority])), session->timeout*HZ/1000);
    }
    else if ((type == SLEEP_WRITE) && (priority == HIGH_PRIORITY)) {
-      my_wait_event_timeout(the_object->wait_queue[priority], control_awake_cond(len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]),
+      ret = my_wait_event_timeout(the_object->wait_queue[priority], control_awake_cond(len <= ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[priority]),
             &(the_object->operation_synchronizer[priority])), session->timeout*HZ/1000);
    }
    
    AUDIT
    printk("%s: thread %d exiting usleep\n",MODNAME, current->pid);
 
-   if (priority == 0) {
-      high_priority_waiting_threads[minor] -= 1;
-   }
-   else {
-      low_priority_waiting_threads[minor] -= 1;
-   }
-
-   //different condition based on the type of the operation and the priority
-   if ((type == READ && the_object->valid_bytes[priority] <= 0)
-         || (type == WRITE && priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
-         || (type == WRITE && priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
+   if (ret == 0 ) {
+      mutex_lock(&(the_object->operation_synchronizer[priority]));
+      decrement_waiting_threads(priority, minor);
+      mutex_unlock(&(the_object->operation_synchronizer[priority]));
       return -1;
    }
+      /*(type == READ && the_object->valid_bytes[priority] <= 0)
+         || (type == WRITE && priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
+         || (type == WRITE && priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
+      mutex_lock(&(the_object->operation_synchronizer[priority]));
+      decrement_waiting_threads(priority, minor);
+      mutex_unlock(&(the_object->operation_synchronizer[priority]);
+      return -1;*/
+   decrement_waiting_threads(priority, minor);
    return 0;
 }
 
@@ -375,8 +374,25 @@ list_stream* allocate_pages(size_t len) {
       temp_node = new_node;
       new_pages--;
    }
-
    return list_head;
+}
+
+
+int deallocate_prev_pages(list_stream* list_head) {
+
+   list_stream* temp_node;
+   if (list_head != NULL) {
+      while(list_head->next != NULL) {
+         temp_node = list_head->next;
+         list_head->next = temp_node->next;
+         free_page((unsigned long)temp_node->buffer);
+         kfree((void*)temp_node);
+      }
+      free_page((unsigned long)list_head->buffer);
+      kfree((void*)list_head);
+      //kfree((void*)temp_buff);
+   }
+   return -ENOSPC; 
 }
 
 /* the actual driver */
@@ -449,10 +465,9 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    int offset;
    object_state *the_object;
    session_state *session = (session_state *)filp->private_data;
-   list_stream* current_node;
-   list_stream* new_node;
-   list_stream* temp_node;
    char* temp_buff;
+   list_stream* current_node;
+   list_stream* new_node = NULL;
    list_stream* list_head = NULL;
    int new_pages = 0;
 
@@ -477,24 +492,31 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    ret = my_lock(the_object, session);
    if (ret != 0) {
       kfree((void*)temp_buff);
+      deallocate_prev_pages(list_head);
       return -EBUSY;
    }
 
    //field reserved_bytes only matters for low_priority flow
    if ((session->priority == HIGH_PRIORITY && ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[session->priority]) < len) ||
       (session->priority == LOW_PRIORITY && (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[session->priority]) < len)) {
-      mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       if (session->blocking && session->timeout != 0) {
+         
+         increment_waiting_threads(session->priority, minor);
+
+         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          ret = goto_sleep(session, SLEEP_WRITE, the_object, len);
          if (ret == -1) {
             printk("%s: The timeout elapsed and there are not enough available space\n", MODNAME);
             kfree((void*)temp_buff);
+            deallocate_prev_pages(list_head);
             return 0;      //no enough data on device
          }
       }
       else {
+         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+         printk("%s: There is not enough available space\n", MODNAME);
+         deallocate_prev_pages(list_head);
          kfree((void*)temp_buff);
-         printk("%s: There are not enough available space\n", MODNAME);
          return -ENOSPC;      //no space left on device
       }
    }
@@ -505,49 +527,58 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       pages +=1;
       current_node = current_node->next;
    }
-
-   // linking of previously allocated elements to the list containing data flow
-   if (len >= (PAGE_DIM)) {
-      current_node->next = list_head;
-      list_head->prev = current_node;
-      new_pages = len / PAGE_DIM;
-   }
    
+   new_pages = len / PAGE_DIM;
+
+   if (new_pages + pages >= MAX_PAGES) {
+      printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
+      mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+      kfree((void*)temp_buff);
+      //deallocate the pages
+      deallocate_prev_pages(list_head);
+      return -ENOMEM;
+   }
+
    if (len + offset - (new_pages * PAGE_DIM) >= PAGE_DIM) {      //the page is a the end and it is necessary to allocate an additional page
 
       new_pages++;
       //new elements must be allocated for the list for the current flow, compliant with variable MAX_PAGES
-      if (new_pages >= MAX_PAGES) {
+      if (new_pages + pages >= MAX_PAGES) {
          printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+         kfree((void*)temp_buff);
          //deallocate the pages
-         goto deallocate_prev_pages;
+         deallocate_prev_pages(list_head);
+         return -ENOMEM;
       }
 
       new_node = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
       new_node->buffer = (char*)__get_free_page(GFP_ATOMIC);
       //checking that memory allocation does not fail
       if ((new_node == NULL) || (new_node->buffer == NULL)) {
-         printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
+         printk("%s: Error in new node allocation", MODNAME);
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
 
          free_page((unsigned long)new_node->buffer);
          kfree((void*)new_node);
+
+         kfree((void*)temp_buff);
          //if fails, all the new allocated buffers have to be deleted
-         goto deallocate_prev_pages;
+         deallocate_prev_pages(list_head);
+         return 0;
       }
-      
-      if (list_head != NULL) {
-         new_node->prev = current_node;
-         new_node->next = list_head;
-         list_head->prev = new_node;
-         current_node->next = new_node;
-      }
-      else {
-         new_node->prev = current_node;
-         new_node->next = NULL;
-         current_node->next = new_node;
-      }
+   }
+
+   if (new_node != NULL) {
+      new_node->prev = current_node;
+      new_node->next = NULL;
+      current_node->next = new_node;
+   }
+
+   // linking of previously allocated elements to the list containing data flow
+   if (list_head != NULL) {
+      current_node->next = list_head;
+      list_head->prev = current_node;
    }
 
    if (len + offset >= PAGE_DIM) {
@@ -613,20 +644,6 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    wake_up(&the_object->wait_queue[session->priority]);
 
    return len - ret_copy;
-
-deallocate_prev_pages:
-   if (list_head != NULL) {
-      while(list_head->next != NULL) {
-      temp_node = list_head->next;
-      list_head->next = temp_node->next;
-      free_page((unsigned long)temp_node->buffer);
-      kfree((void*)temp_node);
-   }
-   free_page((unsigned long)list_head->buffer);
-   kfree((void*)list_head);
-   kfree((void*)temp_buff);
-   }
-   return -ENOSPC; 
 }
 
 
@@ -662,6 +679,9 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
 
    if (the_object->valid_bytes[session->priority] == 0) {
       if (session->blocking && session->timeout != 0) {
+
+         increment_waiting_threads(session->priority, minor);
+
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          ret = goto_sleep(session, SLEEP_READ, the_object, len);
          if (ret == -1) {

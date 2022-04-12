@@ -39,7 +39,6 @@ __used __section(__versions) = {
 	{ 0x1937241e, "try_module_get" },
 	{ 0xb44ad4b3, "_copy_to_user" },
 	{ 0x88db9f48, "__check_object_size" },
-	{ 0x4302d0eb, "free_pages" },
 	{ 0x7aec9089, "clear_user" },
 	{ 0xeb233a45, "__kmalloc" },
 	{ 0x92540fbf, "finish_wait" },
@@ -49,6 +48,7 @@ __used __section(__versions) = {
 	{ 0xf21017d9, "mutex_trylock" },
 	{ 0xa1c76e0a, "_cond_resched" },
 	{ 0xdecd0b29, "__stack_chk_fail" },
+	{ 0x4302d0eb, "free_pages" },
 	{ 0xf5cb25c8, "kmem_cache_alloc_trace" },
 	{ 0x35216b26, "kmalloc_caches" },
 	{ 0x3ba859c1, "module_put" },
@@ -65,4 +65,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "");
 
 
-MODULE_INFO(srcversion, "02A3D8E8CF015FE94BC30F1");
+MODULE_INFO(srcversion, "E9271393D030DF214CEEDB8");

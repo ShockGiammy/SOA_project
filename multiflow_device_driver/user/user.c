@@ -200,11 +200,9 @@ int main(int argc, char** argv){
 					ret = write(fd, data, strlen(data));
 					if (ret == -1) {
 						printf("There is not more available space\n");
-					}
-					if (ret == 0) {
+					} else if (ret == 0) {
 						printf("Error in write operation\n");
-					}
-					else {
+					} else {
 						printf("%d bytes are correctly written to device %s\n", ret, device);
 					}
 				}
@@ -221,8 +219,9 @@ int main(int argc, char** argv){
 					ret = read(fd, buff, len);
 					if (ret == 0) {
 						printf("Not enough data to read\n");
-					}
-					else {
+					} else if (ret == -1) {
+						printf("There was a problem with read operation\n");
+					} else {
 						printf("%d bytes are correctly read from device %s\n", ret, device);
 					}
 					printf("%s", buff);
