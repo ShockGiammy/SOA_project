@@ -332,8 +332,11 @@ list_stream* allocate_pages(size_t len) {
    new_pages = len / PAGE_DIM;
 
    if (new_pages >= MAX_PAGES) {
-      return 0; 
+      return NULL; 
    }
+
+   AUDIT
+   printk("%s: request allocation success of %d pages\n", MODNAME, new_pages);
 
    list_head = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
    list_head->buffer = (char*)__get_free_page(GFP_ATOMIC);
@@ -363,7 +366,7 @@ list_stream* allocate_pages(size_t len) {
          }
          free_page((unsigned long)list_head->buffer);
          kfree((void*)list_head);
-         return 0; 
+         return NULL; 
       }
    
       new_node->prev = temp_node;
@@ -372,6 +375,7 @@ list_stream* allocate_pages(size_t len) {
       temp_node = new_node;
       new_pages--;
    }
+
    return list_head;
 }
 
@@ -448,8 +452,8 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    list_stream* current_node;
    list_stream* new_node;
    list_stream* temp_node;
-   list_stream* list_head;
    char* temp_buff;
+   list_stream* list_head = NULL;
    int new_pages = 0;
 
    int pages = 0;
@@ -464,7 +468,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    // allocation of the necessary pages outside the critical section
    if (len >= (PAGE_DIM)) {
       list_head = allocate_pages(len);
-      if (list_head == 0) {
+      if (list_head == NULL) {
          return -ENOMEM;
       }
    }
@@ -490,6 +494,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       }
       else {
          kfree((void*)temp_buff);
+         printk("%s: There are not enough available space\n", MODNAME);
          return -ENOSPC;      //no space left on device
       }
    }
@@ -507,6 +512,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       list_head->prev = current_node;
       new_pages = len / PAGE_DIM;
    }
+   
    if (len + offset - (new_pages * PAGE_DIM) >= PAGE_DIM) {      //the page is a the end and it is necessary to allocate an additional page
 
       new_pages++;
@@ -531,10 +537,17 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          goto deallocate_prev_pages;
       }
       
-      new_node->prev = current_node;
-      new_node->next = list_head;
-      list_head->prev = new_node;
-      current_node->next = new_node;
+      if (list_head != NULL) {
+         new_node->prev = current_node;
+         new_node->next = list_head;
+         list_head->prev = new_node;
+         current_node->next = new_node;
+      }
+      else {
+         new_node->prev = current_node;
+         new_node->next = NULL;
+         current_node->next = new_node;
+      }
    }
 
    if (len + offset >= PAGE_DIM) {
@@ -602,7 +615,8 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    return len - ret_copy;
 
 deallocate_prev_pages:
-   while(list_head->next != NULL) {
+   if (list_head != NULL) {
+      while(list_head->next != NULL) {
       temp_node = list_head->next;
       list_head->next = temp_node->next;
       free_page((unsigned long)temp_node->buffer);
@@ -611,6 +625,7 @@ deallocate_prev_pages:
    free_page((unsigned long)list_head->buffer);
    kfree((void*)list_head);
    kfree((void*)temp_buff);
+   }
    return -ENOSPC; 
 }
 

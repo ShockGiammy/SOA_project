@@ -198,6 +198,9 @@ int main(int argc, char** argv){
 					printf("\nWhat data do you want to write?\n");
 					fgets(data, MAX_SIZE, stdin);
 					ret = write(fd, data, strlen(data));
+					if (ret == -1) {
+						printf("There is not more available space\n");
+					}
 					if (ret == 0) {
 						printf("Error in write operation\n");
 					}
