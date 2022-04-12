@@ -32,8 +32,8 @@ __used __section(__versions) = {
 	{ 0xe6278ff5, "__register_chrdev" },
 	{ 0xd9a5ea54, "__init_waitqueue_head" },
 	{ 0x977f511b, "__mutex_init" },
-	{ 0x6a5cb5ee, "__get_free_pages" },
 	{ 0x362ef408, "_copy_from_user" },
+	{ 0x6a5cb5ee, "__get_free_pages" },
 	{ 0xc5b6f236, "queue_work_on" },
 	{ 0x2d3385d3, "system_wq" },
 	{ 0x1937241e, "try_module_get" },
@@ -65,4 +65,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "");
 
 
-MODULE_INFO(srcversion, "0B969F12097F39A37CB12E1");
+MODULE_INFO(srcversion, "2C19B549C3EC434B6A45EB1");

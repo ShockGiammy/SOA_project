@@ -212,8 +212,8 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
 
    //different condition based on the type of the operation and the priority
    if ((type == READ && the_object->valid_bytes[priority] <= 0)
-         || (type == WRITE && control->priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
-         || (type == WRITE && control->priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
+         || (type == WRITE && priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
+         || (type == WRITE && priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
       return -1;
    }
    return 0;
@@ -226,10 +226,10 @@ void asynchronous_write(unsigned long data){
    const char *buff = container_of((void*)data,packed_work,the_work)->buffer;
    size_t len = container_of((void*)data,packed_work,the_work)->len;
    int minor = container_of((void*)data,packed_work,the_work)->minor;
-   the_object = objects + minor;
    int offset;
    int pages;
    list_stream* current_node;
+   the_object = objects + minor;
    
    AUDIT{
    printk("%s: this print comes from kworker daemon with PID=%d - running on CPU-core %d\n", MODNAME, current->pid, smp_processor_id());
@@ -322,39 +322,58 @@ int put_work(char *buff, size_t len, int minor){
    return 0;
 }
 
-int allocate_pages() {
-   if (len >= (PAGE_DIM)) {
+list_stream* allocate_pages(size_t len) {
 
-      new_pages = len / PAGE_DIM;
+   list_stream* list_head;
+   list_stream* new_node;
+   list_stream* temp_node;
+   int new_pages;
 
-      while (new_pages > 0) {
-         new_node = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
-         new_node->buffer = (char*)__get_free_page(GFP_ATOMIC);
-         //checking that memory allocation does not fail
-         if ((new_node == NULL) || (new_node->buffer == NULL)) {
-            free_page((unsigned long)new_node->buffer);
-            kfree((void*)new_node);
-            //if fails, all the new allocated buffers have to be deleted
-            while(current_node->next != NULL) {
-               temp_node = current_node->next;
-               current_node->next = temp_node->next;
-               free_page((unsigned long)temp_node->buffer);
-               kfree((void*)temp_node);
-            }
-            kfree((void*)temp_buff);
-            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-            return -ENOMEM; 
-         }
-      
-         new_node->prev = temp_node;
-         new_node->next = NULL;
-         temp_node->next = new_node;
-         temp_node = new_node;
-         new_pages--;
-      }
+   new_pages = len / PAGE_DIM;
+
+   if (new_pages >= MAX_PAGES) {
+      return 0; 
    }
-}
 
+   list_head = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
+   list_head->buffer = (char*)__get_free_page(GFP_ATOMIC);
+   //checking that memory allocation does not fail
+   if ((list_head == NULL) || (list_head->buffer == NULL)) {
+      free_page((unsigned long)list_head->buffer);
+      kfree((void*)list_head);
+   }
+   list_head->prev = NULL;
+   list_head->next = NULL;
+   new_pages--;
+
+   temp_node = list_head;
+   while (new_pages > 0) {
+      new_node = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
+      new_node->buffer = (char*)__get_free_page(GFP_ATOMIC);
+      //checking that memory allocation does not fail
+      if ((new_node == NULL) || (new_node->buffer == NULL)) {
+         free_page((unsigned long)new_node->buffer);
+         kfree((void*)new_node);
+         //if fails, all the new allocated buffers have to be deleted
+         while(list_head->next != NULL) {
+            temp_node = list_head->next;
+            list_head->next = temp_node->next;
+            free_page((unsigned long)temp_node->buffer);
+            kfree((void*)temp_node);
+         }
+         free_page((unsigned long)list_head->buffer);
+         kfree((void*)list_head);
+         return 0; 
+      }
+   
+      new_node->prev = temp_node;
+      new_node->next = NULL;
+      temp_node->next = new_node;
+      temp_node = new_node;
+      new_pages--;
+   }
+   return list_head;
+}
 
 /* the actual driver */
 
@@ -429,8 +448,9 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    list_stream* current_node;
    list_stream* new_node;
    list_stream* temp_node;
+   list_stream* list_head;
    char* temp_buff;
-   int new_pages;
+   int new_pages = 0;
 
    int pages = 0;
    the_object = objects + minor;
@@ -442,7 +462,12 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    ret_copy = copy_from_user(temp_buff, buff, len);
 
    // allocation of the necessary pages outside the critical section
-   allocate_pages();
+   if (len >= (PAGE_DIM)) {
+      list_head = allocate_pages(len);
+      if (list_head == 0) {
+         return -ENOMEM;
+      }
+   }
 
    //need to lock in any case
    ret = my_lock(the_object, session);
@@ -476,46 +501,46 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
       current_node = current_node->next;
    }
 
-   if (len + offset >= (PAGE_DIM)) {      //the page is a the end
+   // linking of previously allocated elements to the list containing data flow
+   if (len >= (PAGE_DIM)) {
+      current_node->next = list_head;
+      list_head->prev = current_node;
+      new_pages = len / PAGE_DIM;
+   }
+   if (len + offset - (new_pages * PAGE_DIM) >= PAGE_DIM) {      //the page is a the end and it is necessary to allocate an additional page
 
-      new_pages = (len + offset) / PAGE_DIM;
+      new_pages++;
       //new elements must be allocated for the list for the current flow, compliant with variable MAX_PAGES
-      if (pages + new_pages >= MAX_PAGES) {
+      if (new_pages >= MAX_PAGES) {
          printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-         kfree((void*)temp_buff);
-         return -ENOSPC; 
+         //deallocate the pages
+         goto deallocate_prev_pages;
       }
 
-      temp_node = current_node;
-      while (new_pages > 0) {
-         new_node = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
-         new_node->buffer = (char*)__get_free_page(GFP_ATOMIC);
-         //checking that memory allocation does not fail
-         if ((new_node == NULL) || (new_node->buffer == NULL)) {
-            free_page((unsigned long)new_node->buffer);
-            kfree((void*)new_node);
-            //if fails, all the new allocated buffers have to be deleted
-            while(current_node->next != NULL) {
-               temp_node = current_node->next;
-               current_node->next = temp_node->next;
-               free_page((unsigned long)temp_node->buffer);
-               kfree((void*)temp_node);
-            }
-            kfree((void*)temp_buff);
-            mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
-            return -ENOMEM; 
-         }
+      new_node = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
+      new_node->buffer = (char*)__get_free_page(GFP_ATOMIC);
+      //checking that memory allocation does not fail
+      if ((new_node == NULL) || (new_node->buffer == NULL)) {
+         printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
+         mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
+
+         free_page((unsigned long)new_node->buffer);
+         kfree((void*)new_node);
+         //if fails, all the new allocated buffers have to be deleted
+         goto deallocate_prev_pages;
+      }
       
-         new_node->prev = temp_node;
-         new_node->next = NULL;
-         temp_node->next = new_node;
-         temp_node = new_node;
-         new_pages--;
-      }
+      new_node->prev = current_node;
+      new_node->next = list_head;
+      list_head->prev = new_node;
+      current_node->next = new_node;
+   }
 
+   if (len + offset >= PAGE_DIM) {
       if (session->priority == HIGH_PRIORITY) {
 
+         new_pages = 0;
          //as many bytes are written as necessary to fill the prev buffer
          memcpy(&(current_node->buffer[offset]), temp_buff, PAGE_DIM - offset);
 
@@ -575,6 +600,18 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    wake_up(&the_object->wait_queue[session->priority]);
 
    return len - ret_copy;
+
+deallocate_prev_pages:
+   while(list_head->next != NULL) {
+      temp_node = list_head->next;
+      list_head->next = temp_node->next;
+      free_page((unsigned long)temp_node->buffer);
+      kfree((void*)temp_node);
+   }
+   free_page((unsigned long)list_head->buffer);
+   kfree((void*)list_head);
+   kfree((void*)temp_buff);
+   return -ENOSPC; 
 }
 
 
