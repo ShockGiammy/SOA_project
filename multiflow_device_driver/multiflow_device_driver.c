@@ -567,9 +567,6 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          deallocate_prev_pages(list_head);
          return 0;
       }
-   }
-
-   if (new_node != NULL) {
       new_node->prev = current_node;
       new_node->next = NULL;
       current_node->next = new_node;
