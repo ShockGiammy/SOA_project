@@ -7,7 +7,7 @@
 #include <sys/ioctl.h>
 
 #define PAGE_DIM (4096) 		//the size of one page
-#define MAX_SIZE (PAGE_DIM*4)	//max size te user application can manage
+#define MAX_SIZE (PAGE_DIM*10)	//max size te user application can manage
 
 
 int open_device(char* device); 

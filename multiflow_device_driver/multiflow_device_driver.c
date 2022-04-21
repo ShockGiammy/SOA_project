@@ -471,7 +471,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    list_stream* list_head = NULL;
    int new_pages = 0;
 
-   int pages = 0;
+   int pages = 1;
    the_object = objects + minor;
    
    printk("%s: somebody called a write on dev with [major,minor] number [%d,%d]\n",
@@ -530,26 +530,26 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
    
    new_pages = len / PAGE_DIM;
 
-   if (new_pages + pages >= MAX_PAGES) {
+   if (new_pages + pages > MAX_PAGES) {
       printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
       mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
       kfree((void*)temp_buff);
       //deallocate the pages
       deallocate_prev_pages(list_head);
-      return -ENOMEM;
+      return -ENOSPC;
    }
 
    if (len + offset - (new_pages * PAGE_DIM) >= PAGE_DIM) {      //the page is a the end and it is necessary to allocate an additional page
 
       new_pages++;
       //new elements must be allocated for the list for the current flow, compliant with variable MAX_PAGES
-      if (new_pages + pages >= MAX_PAGES) {
+      if (new_pages + pages > MAX_PAGES) {
          printk("%s: The memory reserved for the buffer is terminated\n", MODNAME);
          mutex_unlock(&(the_object->operation_synchronizer[session->priority]));
          kfree((void*)temp_buff);
          //deallocate the pages
          deallocate_prev_pages(list_head);
-         return -ENOMEM;
+         return -ENOSPC;
       }
 
       new_node = kzalloc(sizeof(list_stream), GFP_ATOMIC);     //non blocking memory allocation
@@ -567,9 +567,6 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t
          deallocate_prev_pages(list_head);
          return 0;
       }
-   }
-
-   if (new_node != NULL) {
       new_node->prev = current_node;
       new_node->next = NULL;
       current_node->next = new_node;
@@ -712,7 +709,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
 
          //it is possible to deallocate the previous buffers (data are completely read)
          the_object->stream_content[session->priority] = current_node->next;
-         current_node->next->prev = NULL;
+         the_object->stream_content[session->priority]->prev = NULL;
          free_page((unsigned long)current_node->buffer);
          kfree((void*)current_node);
 
@@ -725,9 +722,10 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
       
       //it is possible to deallocate the previous buffers (data are completely read)
       the_object->stream_content[session->priority] = current_node->next;
-      current_node->next->prev = NULL;
+      the_object->stream_content[session->priority]->prev = NULL;
       free_page((unsigned long)current_node->buffer);
       kfree((void*)current_node);
+      
    } 
    else {
       memcpy(temp_buff, &(current_node->buffer[the_object->offset[session->priority]]), len);
