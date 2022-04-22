@@ -207,13 +207,6 @@ int goto_sleep(session_state *session, int type, object_state *the_object, size_
       mutex_unlock(&(the_object->operation_synchronizer[priority]));
       return -1;
    }
-      /*(type == READ && the_object->valid_bytes[priority] <= 0)
-         || (type == WRITE && priority == 0 && len > ((PAGE_DIM * MAX_PAGES) - the_object->valid_bytes[0]))
-         || (type == WRITE && priority == 1 && len > (((PAGE_DIM * MAX_PAGES) - the_object->reserved_bytes) - the_object->valid_bytes[1]))) {
-      mutex_lock(&(the_object->operation_synchronizer[priority]));
-      decrement_waiting_threads(priority, minor);
-      mutex_unlock(&(the_object->operation_synchronizer[priority]);
-      return -1;*/
    decrement_waiting_threads(priority, minor);
    return 0;
 }
